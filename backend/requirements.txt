@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-multipart
+agno
+python-dotenv
+Pillow
+tavily-python
+groq
