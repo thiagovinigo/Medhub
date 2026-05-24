@@ -5,3 +5,16 @@ __pycache__/
 .env
 .DS_Store
 test_models.py
+
+# Logs e banco de dados
+*.log
+*.db
+
+# Screenshots de desenvolvimento
+ss_*.png
+
+# Claude Code
+.claude/
+
+# Artefatos gerados
+DISCOVERY.md

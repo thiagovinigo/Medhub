@@ -9,7 +9,6 @@ from agno.media import Image as AgnoImage
 from agno.tools.tavily import TavilyTools
 from textwrap import dedent
 
-# Modelos LLaMA do Groq (Visão e Texto)
 ID_MODEL_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
 ID_MODEL_TEXT = "llama-3.3-70b-versatile"
 
@@ -50,21 +49,58 @@ prompt_search_template = """Com base na seguinte análise de imagem médica, rea
 Resultado da análise médica: "{}"
 """
 
-def preprocess_img(img_path):
-    """Redimensiona a imagem e salva em formato temporário."""
-    image = PILImage.open(img_path)
+
+def preprocess_img(img_path: str):
+    """Prepara imagem para análise. Suporta DICOM (.dcm) e formatos comuns."""
+    metadata: dict = {}
+
+    if img_path.lower().endswith('.dcm'):
+        import pydicom
+        import numpy as np
+
+        ds = pydicom.dcmread(img_path)
+
+        metadata['modality'] = str(getattr(ds, 'Modality', ''))
+        raw_name = getattr(ds, 'PatientName', '')
+        metadata['patient_name'] = str(raw_name) if raw_name else ''
+        raw_date = str(getattr(ds, 'StudyDate', ''))
+        if len(raw_date) == 8:
+            metadata['study_date'] = f"{raw_date[6:]}/{raw_date[4:6]}/{raw_date[:4]}"
+
+        pixel_array = ds.pixel_array.astype(np.float64)
+
+        # Apply Hounsfield rescale if present (CT scans)
+        slope = float(getattr(ds, 'RescaleSlope', 1))
+        intercept = float(getattr(ds, 'RescaleIntercept', 0))
+        pixel_array = pixel_array * slope + intercept
+
+        # Multi-frame DICOM: take the middle frame
+        if pixel_array.ndim == 3 and pixel_array.shape[0] < pixel_array.shape[1]:
+            pixel_array = pixel_array[pixel_array.shape[0] // 2]
+
+        # Normalize to 0-255
+        pmin, pmax = pixel_array.min(), pixel_array.max()
+        if pmax > pmin:
+            pixel_array = (pixel_array - pmin) / (pmax - pmin) * 255
+        pixel_array = pixel_array.astype('uint8')
+
+        image = PILImage.fromarray(pixel_array)
+        if image.mode not in ('L', 'RGB'):
+            image = image.convert('RGB')
+    else:
+        image = PILImage.open(img_path)
+
     width, height = image.size
-    aspect_ratio = width / height
     img_width = 600
-    img_height = int(img_width / aspect_ratio)
-    resized_img = image.resize((img_width, img_height))
+    img_height = int(img_width / (width / height))
+    resized = image.resize((img_width, img_height))
 
     temp_path = img_path + "_resized.png"
-    resized_img.save(temp_path)
+    resized.save(temp_path)
+    return temp_path, resized, metadata
 
-    return temp_path, resized_img
 
-def format_res(res, return_thinking=False):
+def format_res(res: str, return_thinking: bool = False) -> str:
     res = res.strip()
     if return_thinking:
         res = res.replace("<think>", "[pensando...] ")
@@ -72,30 +108,26 @@ def format_res(res, return_thinking=False):
     else:
         if "</think>" in res:
             res = res.split("</think>")[-1].strip()
-    res = res.replace("```","")
+    res = res.replace("```", "")
     return res
 
-def process_image(file_path: str):
-    """Executa o pipeline completo: processamento, análise e pesquisa usando Groq."""
-    
-    # Valida as chaves de API
+
+def process_image(file_path: str) -> dict:
+    """Executa o pipeline completo: análise + pesquisa usando Groq."""
     groq_key = os.environ.get("GROQ_API_KEY")
     tavily_key = os.environ.get("TAVILY_API_KEY")
-    
+
     if not groq_key:
         raise Exception("Chaves de API do Groq ausentes. O sistema precisa do Llama para rodar.")
-        
+
     med_agent = Agent(
         name="Medical Image Agent",
         role="Especialista em imagens médicas",
         model=Groq(id=ID_MODEL_VISION),
-        markdown=True
+        markdown=True,
     )
 
-    tools = []
-    if tavily_key:
-        tools.append(TavilyTools())
-
+    tools = [TavilyTools()] if tavily_key else []
     research_agent = Agent(
         name="Researcher Agent",
         role="Pesquisador médico",
@@ -104,26 +136,24 @@ def process_image(file_path: str):
             Utilize ferramentas de busca (se ativas) para encontrar literatura médica recente, protocolos de tratamento padrão e avanços tecnológicos relevantes."""
         ),
         model=Groq(id=ID_MODEL_TEXT),
-        tools=tools
+        tools=tools,
     )
 
-    temp_path, _ = preprocess_img(file_path)
+    temp_path, _, metadata = preprocess_img(file_path)
     agno_img = AgnoImage(filepath=temp_path)
 
-    # 1. Análise Médica
     res_med = med_agent.run(prompt_analysis, images=[agno_img])
     analysis_text = format_res(res_med.content)
 
-    # 2. Pesquisa Complementar
     prompt_search = prompt_search_template.format(analysis_text)
     res_search = research_agent.run(prompt_search)
     research_text = format_res(res_search.content)
-    
-    # Limpeza
+
     if os.path.exists(temp_path):
         os.remove(temp_path)
 
     return {
         "analysis": analysis_text,
-        "research": research_text
+        "research": research_text,
+        "metadata": metadata,
     }
