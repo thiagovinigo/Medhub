@@ -94,10 +94,21 @@ export default function App() {
     const formData = new FormData();
     formData.append('file', file);
     try {
+      const apiUrl = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
-      const res = await fetch(`${API}/api/analyze`, { method: 'POST', body: formData, headers });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'Erro na análise'); }
-      setResults(await res.json());
+      const response = await fetch(`${apiUrl}/api/analyze`, {
+        method: 'POST',
+        body: formData,
+        headers,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Ocorreu um erro na análise');
+      }
+
+      const data = await response.json();
+      setResults(data);
     } catch (err) {
       setError(err.message);
     } finally {
