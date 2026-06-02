@@ -16,5 +16,8 @@ ss_*.png
 # Claude Code
 .claude/
 
+# PDFs de curso / material externo
+*.pdf
+
 # Artefatos gerados
 DISCOVERY.md
