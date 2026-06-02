@@ -1211,6 +1211,20 @@ main {
   color: var(--text-muted);
 }
 
+/* Classifying state */
+.classifying-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 10px;
+  margin-top: 10px;
+  font-size: 0.875rem;
+  color: #818cf8;
+}
+
 /* Add-more button inside exam block */
 .exam-add-more-btn {
   display: inline-flex;

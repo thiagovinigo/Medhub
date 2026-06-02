@@ -14,7 +14,7 @@ import traceback
 from supabase import create_client, Client
 load_dotenv(dotenv_path="../.env")
 
-from agents import process_image
+from agents import process_image, classify_uploaded_files
 from case_agents import process_case, generate_suggestion
 from doc_parser import extract_text
 from database import (
@@ -117,6 +117,14 @@ class SuggestRequest(BaseModel):
     analysis: str
     suggestion_type: str
     patient_context: Optional[str] = ""
+
+class FileInfoItem(BaseModel):
+    index: int
+    filename: str
+    is_document: bool
+
+class ClassifyRequest(BaseModel):
+    files: List[FileInfoItem]
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -232,6 +240,14 @@ async def analyze(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+# ── File Classification ────────────────────────────────────────────────────────
+
+@app.post("/api/classify-files")
+def classify_files(req: ClassifyRequest):
+    file_infos = [{"index": f.index, "filename": f.filename, "is_document": f.is_document} for f in req.files]
+    return classify_uploaded_files(file_infos)
 
 
 # ── Suggest ───────────────────────────────────────────────────────────────────

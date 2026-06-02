@@ -152,6 +152,7 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const docRef = useRef(null);
   const centralFileRef = useRef(null);
+  const [classifying, setClassifying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [results, setResults] = useState(null);
@@ -163,20 +164,82 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
   const updateExam = (i, val) => setExams(prev => prev.map((e, idx) => idx === i ? val : e));
   const removeExam = (i) => setExams(prev => prev.filter((_, idx) => idx !== i));
 
-  // Each drag-drop onto the central zone = 1 exam
-  const handleCentralDrop = (rawFiles) => {
+  // Each drag-drop: if only 1 file → add directly; if multiple → call classification agent
+  const handleCentralDrop = async (rawFiles) => {
     const files = Array.from(rawFiles);
     if (files.length === 0) return;
-    const autoName = guessExamName(files);
 
-    setExams(prev => {
-      // If the first exam is still empty, fill it
-      if (prev.length === 1 && prev[0].files.length === 0) {
-        return [{ ...prev[0], files, name: prev[0].name || autoName }];
+    const isDoc = (f) => /\.(pdf|doc|docx)$/i.test(f.name);
+
+    // Single file: skip agent, add directly
+    if (files.length === 1) {
+      if (isDoc(files[0])) {
+        setDocFiles(prev => [...prev, files[0]]);
+      } else {
+        const autoName = guessExamName(files);
+        setExams(prev => {
+          if (prev.length === 1 && prev[0].files.length === 0)
+            return [{ ...prev[0], files, name: prev[0].name || autoName }];
+          return [...prev, { name: autoName, modality: card?.suggestedModality || '', exam_date: '', files }];
+        });
       }
-      // Otherwise create a new exam block
-      return [...prev, { name: autoName, modality: card?.suggestedModality || '', exam_date: '', files }];
-    });
+      return;
+    }
+
+    // Multiple files: call classification agent
+    setClassifying(true);
+    setError('');
+    try {
+      const fileInfos = files.map((f, i) => ({
+        index: i,
+        filename: f.name,
+        is_document: isDoc(f),
+      }));
+
+      const res = await fetch(`${API}/api/classify-files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: fileInfos }),
+      });
+      if (!res.ok) throw new Error('classify failed');
+      const { exams: groups = [], document_indices: docIdx = [] } = await res.json();
+
+      // Apply documents
+      const newDocs = docIdx.map(i => files[i]).filter(Boolean);
+      if (newDocs.length > 0) setDocFiles(prev => [...prev, ...newDocs]);
+
+      // Apply exam groups
+      const newExams = groups
+        .filter(g => g.indices?.length > 0)
+        .map(g => ({
+          name: g.name || guessExamName(g.indices.map(i => files[i]).filter(Boolean)),
+          modality: g.modality || card?.suggestedModality || '',
+          exam_date: '',
+          files: g.indices.map(i => files[i]).filter(Boolean),
+        }));
+
+      if (newExams.length > 0) {
+        setExams(prev => {
+          const isEmpty = prev.length === 1 && prev[0].files.length === 0;
+          return isEmpty ? newExams : [...prev, ...newExams];
+        });
+      }
+    } catch {
+      // Fallback: images → one exam, docs → docFiles
+      const docs = files.filter(isDoc);
+      const imgs = files.filter(f => !isDoc(f));
+      if (docs.length > 0) setDocFiles(prev => [...prev, ...docs]);
+      if (imgs.length > 0) {
+        const autoName = guessExamName(imgs);
+        setExams(prev => {
+          if (prev.length === 1 && prev[0].files.length === 0)
+            return [{ ...prev[0], files: imgs, name: autoName }];
+          return [...prev, { name: autoName, modality: card?.suggestedModality || '', exam_date: '', files: imgs }];
+        });
+      }
+    } finally {
+      setClassifying(false);
+    }
   };
 
   const hasFiles = exams.some(e => e.files.length > 0);
@@ -430,8 +493,16 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
                 onChange={e => { handleCentralDrop(e.target.files); e.target.value = ''; }} />
             </div>
 
+            {/* Estado de classificação */}
+            {classifying && (
+              <div className="classifying-state">
+                <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
+                <span>Agente classificando arquivos...</span>
+              </div>
+            )}
+
             {/* Blocos de exame */}
-            {hasFiles && (
+            {!classifying && hasFiles && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {exams.map((exam, i) => (
                   <ExamBlock key={i} exam={exam} index={i} total={exams.length}

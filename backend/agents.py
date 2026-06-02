@@ -1,4 +1,6 @@
 import os
+import re
+import json
 from dotenv import load_dotenv
 load_dotenv(dotenv_path="../.env")
 
@@ -157,3 +159,82 @@ def process_image(file_path: str) -> dict:
         "research": research_text,
         "metadata": metadata,
     }
+
+
+# ── File Classification Agent ──────────────────────────────────────────────────
+
+def classify_uploaded_files(file_infos: list) -> dict:
+    """
+    Classifies a list of uploaded files into exam groups using LLM.
+    file_infos: [{"index": int, "filename": str, "is_document": bool}]
+    Returns: {"exams": [{"name": str, "modality": str, "indices": [int]}], "document_indices": [int]}
+    """
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
+        return _heuristic_classify(file_infos)
+
+    files_text = "\n".join(
+        f'  {f["index"]}: "{f["filename"]}" ({"documento" if f["is_document"] else "imagem médica"})'
+        for f in file_infos
+    )
+
+    prompt = f"""Você é um classificador de arquivos médicos. Analise os nomes dos arquivos e agrupe-os em exames separados.
+
+Arquivos recebidos:
+{files_text}
+
+Regras:
+- PDF, DOC, DOCX são SEMPRE documentos (laudos, receitas, pedidos). Nunca os coloque em exames.
+- Imagens do mesmo exame têm nomes parecidos (mesmo prefixo ou mesma modalidade e região).
+- Detecte modalidade pelo nome: RM/MRI/ressonancia→MR, RX/raio/radio/xray→XR, TC/tomografia/CT→CT, US/eco/ultrassom→US, PET→PET.
+- Se um arquivo DICOM sem nome descritivo estiver sozinho, crie um exame genérico para ele.
+- Se não houver padrão claro, prefira criar grupos menores a colocar tudo junto.
+
+Retorne SOMENTE JSON válido, sem markdown, sem texto extra:
+{{"exams":[{{"name":"Nome do Exame","modality":"MR","indices":[0,1]}},{{"name":"Outro Exame","modality":"XR","indices":[2]}}],"document_indices":[3]}}"""
+
+    try:
+        from groq import Groq as GroqClient
+        client = GroqClient(api_key=groq_key)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=512,
+        )
+        text = response.choices[0].message.content.strip()
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            result = json.loads(match.group())
+            # Ensure all indices are accounted for — anything missing → documents
+            accounted = set(result.get("document_indices", []))
+            for exam in result.get("exams", []):
+                accounted.update(exam.get("indices", []))
+            missing = [f["index"] for f in file_infos if f["index"] not in accounted]
+            if missing:
+                result["document_indices"] = result.get("document_indices", []) + missing
+            return result
+    except Exception as e:
+        print(f"[classify_uploaded_files] LLM error: {e}")
+
+    return _heuristic_classify(file_infos)
+
+
+def _heuristic_classify(file_infos: list) -> dict:
+    """Fallback: groups by filename prefix when LLM is unavailable."""
+    doc_indices = [f["index"] for f in file_infos if f["is_document"]]
+    image_infos = [f for f in file_infos if not f["is_document"]]
+
+    if not image_infos:
+        return {"exams": [], "document_indices": doc_indices}
+
+    groups: dict = {}
+    for f in image_infos:
+        base = re.split(r'[-_\s\d\.]+', f["filename"])[0].lower() or "exame"
+        groups.setdefault(base, []).append(f["index"])
+
+    exams = [
+        {"name": prefix.capitalize(), "modality": "", "indices": indices}
+        for prefix, indices in groups.items()
+    ]
+    return {"exams": exams, "document_indices": doc_indices}
