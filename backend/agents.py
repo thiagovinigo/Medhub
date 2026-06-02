@@ -163,78 +163,89 @@ def process_image(file_path: str) -> dict:
 
 # ── File Classification Agent ──────────────────────────────────────────────────
 
-def classify_uploaded_files(file_infos: list) -> dict:
+_VISION_CLASSIFY_PROMPT = """Você é um especialista em imagens médicas. Olhe esta imagem e responda APENAS com um JSON válido, sem texto extra, sem markdown.
+
+Identifique:
+- modality: XR (raio-x), MR (ressonância), CT (tomografia), US (ultrassom), ou outro
+- region: região anatômica em português (ex: joelho, tórax, coluna, abdômen)
+- exam_name: nome curto do exame (ex: "Raio-X Joelho", "RM Coluna")
+
+Formato obrigatório:
+{"modality":"XR","region":"joelho","exam_name":"Raio-X Joelho"}"""
+
+
+def _vision_classify_single(image_path: str, filename: str) -> dict:
+    """Calls vision model to identify modality and region of one image."""
+    groq_key = os.environ.get("GROQ_API_KEY")
+    fallback = {"modality": "", "region": "", "exam_name": _clean_filename(filename)}
+    if not groq_key:
+        return fallback
+    temp_path = None
+    try:
+        temp_path, _, _ = preprocess_img(image_path)
+        agno_img = AgnoImage(filepath=temp_path)
+        agent = Agent(
+            name="Image Classifier",
+            model=Groq(id=ID_MODEL_VISION),
+            markdown=False,
+        )
+        result = agent.run(_VISION_CLASSIFY_PROMPT, images=[agno_img])
+        text = format_res(result.content)
+        match = re.search(r'\{[^}]+\}', text)
+        if match:
+            data = json.loads(match.group())
+            # Ensure exam_name is never empty
+            if not data.get("exam_name"):
+                mod = data.get("modality", "")
+                region = data.get("region", "")
+                data["exam_name"] = f"{mod} {region}".strip() or _clean_filename(filename)
+            return data
+    except Exception as e:
+        print(f"[vision_classify] {e}")
+    finally:
+        if temp_path:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+    return fallback
+
+
+def _clean_filename(filename: str) -> str:
+    return filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip().capitalize() or "Exame"
+
+
+def classify_files_with_vision(file_entries: list) -> dict:
     """
-    Classifies a list of uploaded files into exam groups using LLM.
-    file_infos: [{"index": int, "filename": str, "is_document": bool}]
+    Classifies uploaded files using the vision model for images.
+    file_entries: [{"index": int, "filename": str, "path": str, "is_document": bool}]
     Returns: {"exams": [{"name": str, "modality": str, "indices": [int]}], "document_indices": [int]}
     """
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if not groq_key:
-        return _heuristic_classify(file_infos)
+    doc_indices = [e["index"] for e in file_entries if e["is_document"]]
+    image_entries = [e for e in file_entries if not e["is_document"]]
 
-    files_text = "\n".join(
-        f'  {f["index"]}: "{f["filename"]}" ({"documento" if f["is_document"] else "imagem médica"})'
-        for f in file_infos
-    )
-
-    prompt = f"""Você é um classificador de arquivos médicos. Analise os nomes dos arquivos e agrupe-os em exames separados.
-
-Arquivos recebidos:
-{files_text}
-
-Regras:
-- PDF, DOC, DOCX são SEMPRE documentos (laudos, receitas, pedidos). Nunca os coloque em exames.
-- Imagens do mesmo exame têm nomes parecidos (mesmo prefixo ou mesma modalidade e região).
-- Detecte modalidade pelo nome: RM/MRI/ressonancia→MR, RX/raio/radio/xray→XR, TC/tomografia/CT→CT, US/eco/ultrassom→US, PET→PET.
-- Se um arquivo DICOM sem nome descritivo estiver sozinho, crie um exame genérico para ele.
-- Se não houver padrão claro, prefira criar grupos menores a colocar tudo junto.
-
-Retorne SOMENTE JSON válido, sem markdown, sem texto extra:
-{{"exams":[{{"name":"Nome do Exame","modality":"MR","indices":[0,1]}},{{"name":"Outro Exame","modality":"XR","indices":[2]}}],"document_indices":[3]}}"""
-
-    try:
-        from groq import Groq as GroqClient
-        client = GroqClient(api_key=groq_key)
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=512,
-        )
-        text = response.choices[0].message.content.strip()
-        match = re.search(r'\{[\s\S]*\}', text)
-        if match:
-            result = json.loads(match.group())
-            # Ensure all indices are accounted for — anything missing → documents
-            accounted = set(result.get("document_indices", []))
-            for exam in result.get("exams", []):
-                accounted.update(exam.get("indices", []))
-            missing = [f["index"] for f in file_infos if f["index"] not in accounted]
-            if missing:
-                result["document_indices"] = result.get("document_indices", []) + missing
-            return result
-    except Exception as e:
-        print(f"[classify_uploaded_files] LLM error: {e}")
-
-    return _heuristic_classify(file_infos)
-
-
-def _heuristic_classify(file_infos: list) -> dict:
-    """Fallback: groups by filename prefix when LLM is unavailable."""
-    doc_indices = [f["index"] for f in file_infos if f["is_document"]]
-    image_infos = [f for f in file_infos if not f["is_document"]]
-
-    if not image_infos:
+    if not image_entries:
         return {"exams": [], "document_indices": doc_indices}
 
-    groups: dict = {}
-    for f in image_infos:
-        base = re.split(r'[-_\s\d\.]+', f["filename"])[0].lower() or "exame"
-        groups.setdefault(base, []).append(f["index"])
+    # Classify each image with vision model
+    classified = []
+    for entry in image_entries:
+        info = _vision_classify_single(entry["path"], entry["filename"])
+        info["index"] = entry["index"]
+        classified.append(info)
 
-    exams = [
-        {"name": prefix.capitalize(), "modality": "", "indices": indices}
-        for prefix, indices in groups.items()
-    ]
+    # Group by (modality, region) — same combo = same exam
+    groups: dict = {}
+    for c in classified:
+        key = f"{c.get('modality','').upper()}_{c.get('region','').lower()}"
+        if key not in groups:
+            groups[key] = {
+                "name": c.get("exam_name") or f"{c.get('modality','')} {c.get('region','')}".strip(),
+                "modality": c.get("modality", ""),
+                "indices": [],
+            }
+        groups[key]["indices"].append(c["index"])
+
+    exams = list(groups.values())
     return {"exams": exams, "document_indices": doc_indices}

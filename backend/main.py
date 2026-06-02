@@ -14,7 +14,7 @@ import traceback
 from supabase import create_client, Client
 load_dotenv(dotenv_path="../.env")
 
-from agents import process_image, classify_uploaded_files
+from agents import process_image, classify_files_with_vision
 from case_agents import process_case, generate_suggestion
 from doc_parser import extract_text
 from database import (
@@ -118,13 +118,6 @@ class SuggestRequest(BaseModel):
     suggestion_type: str
     patient_context: Optional[str] = ""
 
-class FileInfoItem(BaseModel):
-    index: int
-    filename: str
-    is_document: bool
-
-class ClassifyRequest(BaseModel):
-    files: List[FileInfoItem]
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -245,9 +238,32 @@ async def analyze(
 # ── File Classification ────────────────────────────────────────────────────────
 
 @app.post("/api/classify-files")
-def classify_files(req: ClassifyRequest):
-    file_infos = [{"index": f.index, "filename": f.filename, "is_document": f.is_document} for f in req.files]
-    return classify_uploaded_files(file_infos)
+async def classify_files(files: List[UploadFile] = File(...)):
+    """Receives actual files, uses vision model to identify each exam type, groups and returns."""
+    doc_exts = {"pdf", "doc", "docx"}
+    tmp_paths = []
+    file_entries = []
+    try:
+        for i, f in enumerate(files):
+            ext = (f.filename or "").split(".")[-1].lower()
+            is_doc = ext in doc_exts
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                tmp.write(await f.read())
+                tmp_paths.append(tmp.name)
+            file_entries.append({
+                "index": i,
+                "filename": f.filename or f"arquivo_{i}",
+                "path": tmp_paths[-1],
+                "is_document": is_doc,
+            })
+        return classify_files_with_vision(file_entries)
+    finally:
+        for p in tmp_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
 
 
 # ── Suggest ───────────────────────────────────────────────────────────────────

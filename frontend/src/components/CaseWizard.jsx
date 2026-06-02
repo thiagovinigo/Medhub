@@ -186,20 +186,16 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
       return;
     }
 
-    // Multiple files: call classification agent
+    // Multiple files: send to vision classification agent
     setClassifying(true);
     setError('');
     try {
-      const fileInfos = files.map((f, i) => ({
-        index: i,
-        filename: f.name,
-        is_document: isDoc(f),
-      }));
+      const formData = new FormData();
+      files.forEach(f => formData.append('files', f));
 
       const res = await fetch(`${API}/api/classify-files`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: fileInfos }),
+        body: formData,
       });
       if (!res.ok) throw new Error('classify failed');
       const { exams: groups = [], document_indices: docIdx = [] } = await res.json();
