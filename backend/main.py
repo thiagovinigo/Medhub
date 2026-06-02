@@ -1,6 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ import os
 import tempfile
 import json
 import uuid
+import traceback
 from supabase import create_client, Client
 load_dotenv(dotenv_path="../.env")
 
@@ -43,12 +44,33 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "type": type(exc).__name__},
+    )
+
+
 @app.on_event("startup")
 def startup():
     try:
         create_tables()
     except Exception as e:
         print(f"[startup] create_tables failed (non-fatal): {e}")
+
+
+@app.get("/api/dbcheck")
+def dbcheck():
+    db_url = os.environ.get("DATABASE_URL", "NOT_SET")
+    masked = db_url[:30] + "..." if len(db_url) > 30 else db_url
+    try:
+        from database import engine
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+        return {"db": "connected", "url_preview": masked}
+    except Exception as e:
+        return {"db": "error", "url_preview": masked, "error": str(e)}
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
