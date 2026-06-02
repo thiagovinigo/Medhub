@@ -2,6 +2,8 @@
 
 Guidance for Claude Code when working with this repository.
 
+> Documentação de segurança detalhada: [seguranca.md](./seguranca.md)
+
 ## Project Overview
 
 **MedAI Diagnostics** — plataforma full-stack de análise de imagens médicas com IA. O usuário faz upload de imagens (raio-X, RM, TC, ultrassom, DICOM), e dois agentes Groq/LLaMA retornam um laudo estruturado em português + pesquisa acadêmica relacionada.
@@ -145,6 +147,17 @@ TAVILY_API_KEY=...        # opcional
 DATABASE_URL=...          # omita para usar SQLite local em /tmp
 SECRET_KEY=dev-secret
 ```
+
+## Security
+
+Consulte [seguranca.md](./seguranca.md) para o guia completo. Resumo dos pontos críticos:
+
+- **Nunca commitar `.env`** — chaves ficam nos painéis do Railway e Vercel
+- **`SECRET_KEY`** deve estar definida no Railway (o fallback de dev é inseguro em produção)
+- **`DATABASE_URL`** deve usar o Connection Pooler do Supabase (IPv4)
+- Todas as queries já filtram por `user_id` — nunca retornar dados de outro usuário
+- Uploads validam extensão em `main.py` antes de processar
+- Prompts são fixos no código (`agents.py`) — usuário não controla as instruções da IA
 
 ## Known Issues
 
