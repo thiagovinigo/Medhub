@@ -1,47 +1,122 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working with this repository.
 
 ## Project Overview
 
-**MedAI Diagnostics** — aplicação full-stack de análise de imagens médicas com IA. O usuário faz upload de uma imagem (raio-X, RM, TC, ultrassom), e dois agentes Groq/LLaMA retornam um laudo estruturado + pesquisa acadêmica relacionada.
+**MedAI Diagnostics** — plataforma full-stack de análise de imagens médicas com IA. O usuário faz upload de imagens (raio-X, RM, TC, ultrassom, DICOM), e dois agentes Groq/LLaMA retornam um laudo estruturado em português + pesquisa acadêmica relacionada.
 
-## Architecture
+## Deployment Architecture
 
-Two independent services that must run simultaneously:
-
-- **Backend** (`backend/`) — FastAPI + Python. Exposes a single endpoint `POST /api/analyze` that receives an image file, preprocesses it, and runs the two-agent pipeline.
-- **Frontend** (`frontend/`) — React 19 + Vite. Single-page app that uploads the image and renders the markdown results.
-
-### Agent Pipeline (`backend/agents.py`)
-
-`process_image(file_path)` is the core function — it orchestrates two sequential `agno` agents:
-
-1. **Medical Image Agent** — uses `meta-llama/llama-4-scout-17b-16e-instruct` (vision) via Groq to analyze the image and return a 4-section structured report in Portuguese.
-2. **Research Agent** — uses `llama-3.3-70b-versatile` (text) via Groq + optional Tavily web search to find clinical literature based on the analysis from step 1.
-
-Image preprocessing: `preprocess_img()` resizes images to 600px width before sending to the vision model, saving to a temp file that is cleaned up after use.
-
-The `format_res()` helper strips `<think>` chain-of-thought tokens from model output before returning to the client.
-
-### API Contract
-
-`POST /api/analyze` — FormData with a single `file` field (jpg/jpeg/png/bmp/gif). Returns:
-```json
-{ "analysis": "<markdown string>", "research": "<markdown string>" }
+```
+Browser
+  └─▶ Vercel (frontend)          https://<projeto>.vercel.app
+        └─▶ Railway (backend)    https://<projeto>.up.railway.app
+              └─▶ Supabase       PostgreSQL (connection pooler IPv4)
 ```
 
-The frontend hardcodes `http://localhost:8000` as the backend URL (`frontend/src/App.jsx:59`).
+| Camada    | Plataforma | Stack                        |
+|-----------|------------|------------------------------|
+| Frontend  | Vercel     | React 19 + Vite              |
+| Backend   | Railway    | FastAPI + Python 3.11        |
+| Banco     | Supabase   | PostgreSQL (pooler porta 5432) |
 
-## Environment Setup
+### Variáveis de Ambiente
 
-Create `.env` at the **project root** (not inside `backend/`):
+**Railway** (backend):
 ```
-GROQ_API_KEY=...       # Required — used by both agents
-TAVILY_API_KEY=...     # Optional — enables web search in the research agent
+GROQ_API_KEY=...          # Obrigatório
+TAVILY_API_KEY=...        # Opcional (habilita busca web)
+DATABASE_URL=postgresql://postgres.xxx:[senha]@aws-0-[região].pooler.supabase.com:5432/postgres
+SUPABASE_URL=https://xxx.supabase.co
+SUPABASE_KEY=...          # anon key
+SECRET_KEY=...            # JWT secret (mude em produção)
 ```
 
-`backend/main.py` and `backend/agents.py` both call `load_dotenv(dotenv_path="../.env")` to load from the root.
+**Vercel** (frontend):
+```
+VITE_API_URL=https://<seu-backend>.up.railway.app
+```
+
+> **IMPORTANTE:** Use sempre a URL do **Connection Pooler** do Supabase (não a URL direta),
+> pois Railway não suporta IPv6 e a URL direta resolve para IPv6.
+
+## Repository Structure
+
+```
+medicina/
+├── backend/              # FastAPI app (deployed on Railway)
+│   ├── main.py           # Entry point, todos os endpoints REST
+│   ├── agents.py         # Pipeline de IA: analyze + research
+│   ├── case_agents.py    # Agentes para casos clínicos completos
+│   ├── database.py       # SQLAlchemy models + engine
+│   ├── auth.py           # JWT auth (bcrypt + python-jose)
+│   ├── doc_parser.py     # Extração de texto de PDF/DOCX
+│   ├── pdf_generator.py  # Geração de laudo em PDF (fpdf2)
+│   └── requirements.txt
+├── frontend/             # React app (deployed on Vercel)
+│   ├── src/
+│   │   ├── App.jsx       # Root component, state management
+│   │   └── components/   # AuthModal, HistoryPanel, PatientPanel,
+│   │                     # CaseWizard, SpecialtyDashboard, etc.
+│   └── vite.config.js
+├── api/                  # Vercel Python serverless (fallback/legacy)
+│   └── index.py
+├── vercel.json           # Build config: frontend + API routing
+├── .python-version       # 3.11
+└── .env                  # Local only (não commitar)
+```
+
+## Agent Pipeline
+
+### Quick Analysis (`backend/agents.py`)
+
+`process_image(file_path)` — pipeline sequencial com 2 agentes:
+
+1. **Medical Image Agent** — `meta-llama/llama-4-scout-17b-16e-instruct` (vision, Groq)
+   - Recebe imagem redimensionada para 600px de largura
+   - Retorna laudo 4-seções em português: tipo/região, achados, diagnóstico, linguagem leiga
+2. **Research Agent** — `llama-3.3-70b-versatile` (text, Groq) + Tavily opcional
+   - Recebe o texto do laudo e busca literatura complementar
+
+Preprocessing: `preprocess_img()` suporta DICOM (pydicom) e formatos comuns (Pillow).
+Pós-processamento: `format_res()` remove tokens `<think>` do chain-of-thought.
+
+### Case Analysis (`backend/case_agents.py`)
+
+`process_case(payload)` — analisa casos clínicos completos com múltiplos exames + documentos.
+
+## API Contract
+
+| Método | Rota                             | Auth     | Descrição                        |
+|--------|----------------------------------|----------|----------------------------------|
+| GET    | `/`                              | —        | Health check                     |
+| GET    | `/api/dbcheck`                   | —        | Diagnóstico de conexão DB        |
+| POST   | `/api/analyze`                   | opcional | Upload de imagem → laudo IA      |
+| POST   | `/api/cases/analyze`             | opcional | Caso clínico completo            |
+| GET    | `/api/cases`                     | JWT      | Listar casos salvos              |
+| POST   | `/api/suggest`                   | —        | Sugestão clínica por especialidade |
+| POST   | `/api/pdf`                       | —        | Gerar PDF do laudo               |
+| POST   | `/api/auth/register`             | —        | Cadastro                         |
+| POST   | `/api/auth/login`                | —        | Login → token JWT                |
+| GET    | `/api/auth/me`                   | JWT      | Dados do usuário logado          |
+| GET    | `/api/history`                   | JWT      | Histórico de exames              |
+| GET    | `/api/patients`                  | JWT      | Listar pacientes                 |
+| POST   | `/api/patients`                  | JWT      | Criar paciente                   |
+| GET    | `/api/patients/{id}`             | JWT      | Detalhe do paciente              |
+| PUT    | `/api/patients/{id}`             | JWT      | Atualizar paciente               |
+| POST   | `/api/patients/{id}/metrics`     | JWT      | Adicionar métrica (peso/altura)  |
+| POST   | `/api/patients/{id}/conditions`  | JWT      | Adicionar condição clínica       |
+| DELETE | `/api/patients/{id}/conditions/{cid}` | JWT | Remover condição            |
+| GET    | `/api/patients/{id}/cases`       | JWT      | Casos do paciente                |
+
+### Frontend API URL
+
+`App.jsx` usa `import.meta.env.VITE_API_URL` com fallback para `http://localhost:8000` em dev:
+
+```js
+const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
+```
 
 ## Running Locally
 
@@ -52,7 +127,7 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python -m uvicorn main:app --reload
-# Runs on http://localhost:8000
+# http://localhost:8000
 ```
 
 **Frontend** (Terminal 2):
@@ -60,23 +135,19 @@ python -m uvicorn main:app --reload
 cd frontend
 npm install
 npm run dev
-# Runs on http://localhost:5173
+# http://localhost:5173
 ```
 
-## Frontend Commands
-
-```powershell
-cd frontend
-npm run dev      # Dev server
-npm run build    # Production build
-npm run lint     # ESLint
-npm run preview  # Preview production build
+Crie `.env` na raiz do projeto:
+```
+GROQ_API_KEY=...
+TAVILY_API_KEY=...        # opcional
+DATABASE_URL=...          # omita para usar SQLite local em /tmp
+SECRET_KEY=dev-secret
 ```
 
-## Planned Features (from README)
+## Known Issues
 
-- PDF report generation (FPDF/WeasyPrint)
-- Patient history with SQLite
-- Text report upload (PDF lab results) correlated with image analysis
-- Multi-specialist agent routing (oncology, orthopedics, etc.)
-- ABNT/PubMed citation format in prompts
+- **Railway + Supabase IPv6:** Railway não suporta IPv6. Sempre use a URL do **Connection Pooler** do Supabase (Project Settings → Database → Connection Pooling → Session mode, porta 5432) como `DATABASE_URL`.
+- **Vercel Python bundle:** As dependências pesadas (agno, numpy, Pillow) podem aproximar o limite de 250 MB do Vercel. O backend em Railway é o deploy preferencial.
+- **`load_dotenv(dotenv_path="../.env")`** em `main.py` e `agents.py` funciona localmente (`.env` na raiz) mas é ignorado em produção — as variáveis vêm diretamente da plataforma (Railway/Vercel).
