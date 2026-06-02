@@ -11,7 +11,7 @@ import PatientSelector from './components/PatientSelector';
 import SpecialtyDashboard, { SPECIALTY_CARDS } from './components/SpecialtyDashboard';
 import CaseWizard from './components/CaseWizard';
 
-const API = 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
 
 export default function App() {
   // Auth
