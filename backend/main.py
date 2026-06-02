@@ -208,7 +208,7 @@ async def analyze(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-<<<<<<< HEAD
+
 # ── Suggest ───────────────────────────────────────────────────────────────────
 
 @app.post("/api/suggest")
