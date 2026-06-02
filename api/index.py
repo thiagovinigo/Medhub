@@ -2,19 +2,22 @@ import sys
 import os
 import traceback
 
-# Add the project root to the path so `backend` package is importable
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add both the project root AND the backend directory to sys.path
+# Root: so `backend` package is importable as `backend.xxx`
+# Backend dir: so backend's local imports (agents, database, etc.) work
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_backend = os.path.join(_root, "backend")
+sys.path.insert(0, _root)
+sys.path.insert(0, _backend)
 
-# Try importing FastAPI first (minimal)
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Try to import backend and capture any error
 import_error = None
 try:
-    from backend.main import app as real_app
+    from main import app as real_app
     app = real_app
 except Exception as e:
     import_error = traceback.format_exc()
