@@ -396,6 +396,7 @@ Use EXATAMENTE as seções com headers ## conforme mostrado abaixo.
 CONTEXTO DO PACIENTE:
 {patient_context}
 
+{doc_summary_section}
 EXAME:
 Nome: {exam_name} | Modalidade: {modality} | Data: {exam_date}
 Total de imagens na série: {total_images} | Cortes apresentados neste grid: {shown_frames}
@@ -441,6 +442,7 @@ Use EXATAMENTE as seções com headers ## conforme mostrado abaixo.
 CONTEXTO DO PACIENTE:
 {patient_context}
 
+{doc_summary_section}
 ANÁLISES DOS EXAMES:
 {analyses}
 
@@ -471,6 +473,30 @@ ANÁLISES DOS EXAMES:
  - Explique os achados de forma clara, sem jargão médico.
 """
 
+
+DOC_READER_PROMPT = """\
+Você é um médico clínico especializado em interpretação de documentos médicos.
+Analise os documentos clínicos abaixo e extraia as informações mais relevantes de forma estruturada.
+Forneça o resultado direto, sem apresentação.
+
+CONTEXTO DO PACIENTE:
+{patient_context}
+
+DOCUMENTOS RECEBIDOS:
+{documents_text}
+
+## Informações Extraídas dos Documentos
+ - Diagnósticos já estabelecidos, hipóteses diagnósticas do médico solicitante.
+ - Medicamentos prescritos (nome, dose, posologia).
+ - Resultados laboratoriais (valor encontrado | referência | status: normal / alterado).
+ - Procedimentos realizados ou solicitados.
+ - Queixas e histórico relevante mencionados.
+
+## Achados Críticos e Correlações
+ - O que os documentos indicam que é MAIS IMPORTANTE para interpretar os exames de imagem.
+ - Alertas: valores críticos, medicamentos de alto risco, diagnósticos que alteram a interpretação das imagens.
+ - Discrepâncias ou informações que requerem atenção especial.
+"""
 
 SUGGESTION_PROMPTS = {
     "diet": dedent("""\
@@ -567,6 +593,32 @@ Para cada item indique: valor encontrado | valor de referência | ✅ Normal / �
 """
 
 
+def analyze_documents(documents: list, patient_ctx: str) -> str:
+    """
+    Dedicated document reader agent: reads all PDFs/docs and returns a structured clinical summary
+    that gets passed explicitly to image analysis agents.
+    """
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key or not documents:
+        return ""
+    docs_text = "\n\n".join(
+        f"[Documento: {d['name']}]\n{d['text']}" for d in documents if d.get("text")
+    )
+    if not docs_text.strip():
+        return ""
+    agent = Agent(
+        name="Document-Reader-Agent",
+        role="médico clínico especializado em interpretação de documentos médicos",
+        model=Groq(id=ID_MODEL_TEXT),
+        markdown=True,
+    )
+    result = agent.run(DOC_READER_PROMPT.format(
+        patient_context=patient_ctx,
+        documents_text=docs_text[:40000],
+    ))
+    return _fmt(result.content)
+
+
 def generate_suggestion(specialty: str, analysis: str, suggestion_type: str, patient_context: str = "") -> str:
     groq_key = os.environ.get("GROQ_API_KEY")
     if not groq_key:
@@ -607,9 +659,19 @@ def process_case(case_payload: dict) -> dict:
         raise Exception("GROQ_API_KEY não configurada.")
 
     documents = case_payload.get("documents") or []
-    patient_ctx = build_patient_context(case_payload.get("patient", {}), documents)
+    patient_ctx = build_patient_context(case_payload.get("patient", {}))
     temp_files: List[str] = []
     exam_analyses = []
+
+    # ── Step 1: Document Reader Agent ────────────────────────────────────────
+    doc_summary = ""
+    if documents:
+        doc_summary = analyze_documents(documents, patient_ctx)
+
+    doc_summary_section = (
+        f"SÍNTESE DOS DOCUMENTOS CLÍNICOS (gerada por agente leitor):\n{doc_summary}\n\n"
+        if doc_summary else ""
+    )
 
     try:
         for exam in case_payload.get("exams", []):
@@ -634,6 +696,7 @@ def process_case(case_payload: dict) -> dict:
                 specialty_instructions=SPECIALTY_INSTRUCTIONS[specialty],
                 suggestion_instructions=SPECIALTY_SUGGESTION_INSTRUCTIONS.get(specialty, SPECIALTY_SUGGESTION_INSTRUCTIONS["default"]),
                 patient_context=patient_ctx,
+                doc_summary_section=doc_summary_section,
                 exam_name=exam.get("name", "Exame sem nome"),
                 modality=exam.get("modality", "N/A"),
                 exam_date=exam.get("exam_date", "N/A"),
@@ -665,7 +728,7 @@ def process_case(case_payload: dict) -> dict:
                 specialty_label=SPECIALTY_LABELS[specialty_key],
                 specialty_instructions=SPECIALTY_INSTRUCTIONS[specialty_key],
                 suggestion_instructions=SPECIALTY_SUGGESTION_INSTRUCTIONS.get(specialty_key, SPECIALTY_SUGGESTION_INSTRUCTIONS["default"]),
-                patient_ctx=patient_ctx,
+                patient_ctx=patient_ctx + ("\n\n" + doc_summary_section if doc_summary_section else ""),
             )
             text_agent = Agent(
                 name=f"Agent-{specialty_key}-text",
@@ -691,6 +754,7 @@ def process_case(case_payload: dict) -> dict:
             primary_specialty = exam_analyses[0].get("specialty", "default")
             r = consolidator.run(CONSOLIDATION_PROMPT.format(
                 patient_context=patient_ctx,
+                doc_summary_section=doc_summary_section,
                 analyses=analyses_block,
                 suggestion_instructions=SPECIALTY_SUGGESTION_INSTRUCTIONS.get(primary_specialty, SPECIALTY_SUGGESTION_INSTRUCTIONS["default"]),
             ))

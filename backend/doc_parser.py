@@ -1,5 +1,7 @@
-"""Extracts plain text from PDF, DOCX, and DOC files."""
+"""Extracts plain text from PDF, DOCX, and DOC files. Falls back to vision OCR for image-based PDFs."""
 import re
+import os
+import tempfile
 
 # A 15-page Brazilian lab PDF with full panels, reference ranges, units and
 # lab headers sits around 30–50k chars.  50k leaves headroom while staying
@@ -8,13 +10,74 @@ MAX_CHARS = 60000
 
 
 def extract_text(filepath: str) -> str:
+    """Extract text from document. Falls back to vision OCR for image-based PDFs."""
     ext = filepath.lower().rsplit(".", 1)[-1]
     text = ""
     if ext == "pdf":
         text = _from_pdf(filepath)
+        if not text.strip():
+            text = _pdf_ocr_via_vision(filepath)
     elif ext in ("docx", "doc"):
         text = _from_docx(filepath)
     return text[:MAX_CHARS].strip()
+
+
+def _pdf_ocr_via_vision(filepath: str) -> str:
+    """Render PDF pages as images and OCR with the vision model."""
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
+        return ""
+    tmp_imgs = []
+    try:
+        import fitz
+        doc = fitz.open(filepath)
+        pages_text = []
+        for page_num, page in enumerate(doc):
+            mat = fitz.Matrix(2.0, 2.0)
+            pix = page.get_pixmap(matrix=mat)
+            tmp_path = tempfile.mktemp(suffix=f"_page{page_num}.png")
+            pix.save(tmp_path)
+            tmp_imgs.append(tmp_path)
+
+            ocr_text = _vision_ocr_page(tmp_path, groq_key)
+            if ocr_text:
+                pages_text.append(f"[Página {page_num + 1}]\n{ocr_text}")
+        doc.close()
+        return "\n\n".join(pages_text)
+    except Exception as e:
+        print(f"[pdf_ocr_via_vision] {e}")
+        return ""
+    finally:
+        for p in tmp_imgs:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+
+def _vision_ocr_page(image_path: str, groq_key: str) -> str:
+    """Send one page image to the vision model and extract text."""
+    try:
+        from agno.agent import Agent
+        from agno.models.groq import Groq
+        from agno.media import Image as AgnoImage
+        agent = Agent(
+            name="OCR-Agent",
+            model=Groq(id="meta-llama/llama-4-scout-17b-16e-instruct"),
+            markdown=False,
+        )
+        result = agent.run(
+            "Transcreva EXATAMENTE todo o texto visível neste documento médico, preservando estrutura e valores. Não adicione comentários.",
+            images=[AgnoImage(filepath=image_path)]
+        )
+        text = result.content.strip()
+        if "</think>" in text:
+            text = text.split("</think>")[-1].strip()
+        return text
+    except Exception as e:
+        print(f"[vision_ocr_page] {e}")
+        return ""
 
 
 def _from_pdf(filepath: str) -> str:
