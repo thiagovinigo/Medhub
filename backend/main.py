@@ -9,7 +9,8 @@ from datetime import datetime
 import os
 import tempfile
 import json
-
+import uuid
+from supabase import create_client, Client
 load_dotenv(dotenv_path="../.env")
 
 from agents import process_image
@@ -25,6 +26,14 @@ from pdf_generator import generate_report_pdf
 
 app = FastAPI(title="MedAI API", version="2.0.0")
 
+# Inicializa cliente Supabase se as chaves estiverem configuradas
+supabase_url = os.environ.get("SUPABASE_URL")
+supabase_key = os.environ.get("SUPABASE_KEY")
+supabase: Client = None
+if supabase_url and supabase_key:
+    supabase = create_client(supabase_url, supabase_key)
+
+# Permite acesso do front-end
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -156,6 +165,37 @@ async def analyze(
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
             tmp.write(await file.read()); tmp_path = tmp.name
         results = process_image(tmp_path)
+        
+        # Se Supabase estiver configurado, salva a imagem no Storage
+        if supabase:
+            try:
+                import uuid
+                file_name = f"{uuid.uuid4()}.{ext}"
+                content_type = file.content_type or "image/jpeg"
+                with open(tmp_path, "rb") as f:
+                    file_bytes = f.read()
+                
+                supabase.storage.from_("medical-images").upload(
+                    file_name,
+                    file_bytes,
+                    {"content-type": content_type}
+                )
+                
+                public_url = supabase.storage.from_("medical-images").get_public_url(file_name)
+                
+                db_response = supabase.table("analyses").insert({
+                    "image_url": public_url,
+                    "analysis_text": results.get("analysis", ""),
+                    "research_text": results.get("research", "")
+                }).execute()
+                
+                if db_response.data:
+                    results["db_id"] = db_response.data[0]["id"]
+                    results["image_url"] = public_url
+            except Exception as supabase_error:
+                print(f"Erro ao salvar no Supabase: {supabase_error}")
+                results["supabase_error"] = str(supabase_error)
+
         os.remove(tmp_path)
         if user:
             modality = (results.get("metadata") or {}).get("modality", "")
@@ -168,6 +208,7 @@ async def analyze(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+<<<<<<< HEAD
 # ── Suggest ───────────────────────────────────────────────────────────────────
 
 @app.post("/api/suggest")
