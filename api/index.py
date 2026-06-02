@@ -8,11 +8,11 @@ sys.path.insert(0, _backend)
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-_import_error: str | None = None
+_import_error = None
 app = FastAPI()
 
 try:
-    from main import app as _real_app  # type: ignore[assignment]
+    from main import app as _real_app
     app = _real_app
 except Exception:
     _import_error = traceback.format_exc()
