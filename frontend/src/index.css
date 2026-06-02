@@ -1175,6 +1175,63 @@ main {
   background: rgba(59, 130, 246, 0.14);
 }
 
+/* Central drop zone */
+.central-drop-zone {
+  border: 2px dashed rgba(99, 102, 241, 0.4);
+  border-radius: 14px;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  background: rgba(99, 102, 241, 0.03);
+  transition: border-color 0.2s, background 0.2s;
+  text-align: center;
+}
+
+.central-drop-zone:hover,
+.central-drop-zone.dragging {
+  border-color: #6366f1;
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.central-drop-zone .upload-text {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+}
+
+.central-drop-zone .upload-text strong {
+  color: #818cf8;
+}
+
+.central-drop-zone .upload-formats {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Add-more button inside exam block */
+.exam-add-more-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: none;
+  border: 1px dashed var(--border-color);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  margin-top: 4px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.exam-add-more-btn:hover {
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
 /* Wizard results */
 .wizard-results {
   background: var(--bg-card);
