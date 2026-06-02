@@ -3,18 +3,22 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, F
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
 
-# Use DATABASE_URL env var for production (PostgreSQL); fall back to SQLite locally
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./medhub.db")
+# Use DATABASE_URL env var for production (PostgreSQL); fall back to SQLite in /tmp
+_raw_url = os.environ.get("DATABASE_URL", "sqlite:////tmp/medhub.db")
 
 # psycopg2 uses "postgres://" but SQLAlchemy requires "postgresql://"
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if _raw_url.startswith("postgres://"):
+    _raw_url = _raw_url.replace("postgres://", "postgresql://", 1)
 
+# Supabase and most managed PostgreSQL require SSL
+if _raw_url.startswith("postgresql://") and "sslmode" not in _raw_url:
+    _raw_url += "?sslmode=require"
+
+DATABASE_URL = _raw_url
 _is_sqlite = DATABASE_URL.startswith("sqlite")
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 _engine_kwargs = {"connect_args": _connect_args}
 if not _is_sqlite:
-    # Serverless-friendly pool settings for PostgreSQL
     _engine_kwargs.update({"pool_pre_ping": True, "pool_size": 1, "max_overflow": 2})
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -45,7 +45,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup():
-    create_tables()
+    try:
+        create_tables()
+    except Exception as e:
+        print(f"[startup] create_tables failed (non-fatal): {e}")
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
