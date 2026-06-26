@@ -6,12 +6,12 @@ from datetime import date as date_type
 from textwrap import dedent
 from PIL import Image as PILImage
 from agno.agent import Agent
-from agno.models.groq import Groq
+from agno.models.openai import OpenAIChat
 from agno.media import Image as AgnoImage
 from agno.tools.tavily import TavilyTools
 
-ID_MODEL_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
-ID_MODEL_TEXT = "llama-3.3-70b-versatile"
+ID_MODEL_VISION = "gpt-4o"
+ID_MODEL_TEXT = "gpt-4o-mini"
 
 SPECIALTY_LABELS = {
     "spine":     "neurorradiologista especializado em coluna vertebral",
@@ -396,8 +396,7 @@ Use EXATAMENTE as seções com headers ## conforme mostrado abaixo.
 CONTEXTO DO PACIENTE:
 {patient_context}
 
-{doc_summary_section}
-EXAME:
+{doc_summary_section}{other_exams_section}EXAME:
 Nome: {exam_name} | Modalidade: {modality} | Data: {exam_date}
 Total de imagens na série: {total_images} | Cortes apresentados neste grid: {shown_frames}
 
@@ -449,7 +448,7 @@ ANÁLISES DOS EXAMES:
 ## Análise Integrada
  - Correlacione os achados de todos os exames e documentos clínicos.
  - Identifique padrões consistentes e discrepâncias entre os exames.
- - Resumo técnico dos achados mais relevantes de cada exame.
+ - IMPORTANTE: Se houver exames laboratoriais, PRESERVE INTEGRALMENTE a listagem detalhada de resultados (Parâmetro | Resultado | Referência | Status) fornecida nas análises base, com destaque para os valores alterados. Não resuma ou omita a consideração por resultado individual.
 
 ## Correlação Clínica
  - Relacione os achados integrados com a queixa e histórico clínico do paciente.
@@ -556,7 +555,7 @@ Use EXATAMENTE as seções com headers ## conforme mostrado abaixo.
 
 {patient_ctx}
 
-DIRETRIZES ESPECÍFICAS PARA ESTE ESPECIALISTA:
+{other_exams_section}DIRETRIZES ESPECÍFICAS PARA ESTE ESPECIALISTA:
 {specialty_instructions}
 
 REGRA CRÍTICA: Analise CADA parâmetro sem omitir nenhum valor laboratorial.
@@ -598,8 +597,8 @@ def analyze_documents(documents: list, patient_ctx: str) -> str:
     Dedicated document reader agent: reads all PDFs/docs and returns a structured clinical summary
     that gets passed explicitly to image analysis agents.
     """
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if not groq_key or not documents:
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_key or not documents:
         return ""
     docs_text = "\n\n".join(
         f"[Documento: {d['name']}]\n{d['text']}" for d in documents if d.get("text")
@@ -609,7 +608,7 @@ def analyze_documents(documents: list, patient_ctx: str) -> str:
     agent = Agent(
         name="Document-Reader-Agent",
         role="médico clínico especializado em interpretação de documentos médicos",
-        model=Groq(id=ID_MODEL_TEXT),
+        model=OpenAIChat(id=ID_MODEL_TEXT),
         markdown=True,
     )
     result = agent.run(DOC_READER_PROMPT.format(
@@ -620,9 +619,9 @@ def analyze_documents(documents: list, patient_ctx: str) -> str:
 
 
 def generate_suggestion(specialty: str, analysis: str, suggestion_type: str, patient_context: str = "") -> str:
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if not groq_key:
-        raise Exception("GROQ_API_KEY não configurada.")
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_key:
+        raise Exception("OPENAI_API_KEY não configurada.")
     prompt_tpl = SUGGESTION_PROMPTS.get(suggestion_type)
     if not prompt_tpl:
         raise Exception(f"Tipo de sugestão inválido: {suggestion_type}")
@@ -630,7 +629,7 @@ def generate_suggestion(specialty: str, analysis: str, suggestion_type: str, pat
     agent = Agent(
         name="Suggestion-Agent",
         role=SPECIALTY_LABELS.get(specialty, SPECIALTY_LABELS["default"]),
-        model=Groq(id=ID_MODEL_TEXT),
+        model=OpenAIChat(id=ID_MODEL_TEXT),
         markdown=True,
     )
     result = agent.run(prompt)
@@ -644,26 +643,38 @@ def _fmt(text: str) -> str:
     return text.replace("```", "")
 
 
+def _build_other_exams_section(all_exam_names: list, current_name: str) -> str:
+    others = [e for e in all_exam_names if e["name"] != current_name]
+    if not others:
+        return ""
+    lines = ["OUTROS EXAMES NESTE CASO (correlacione seus achados com estes):"]
+    for o in others:
+        lines.append(f"  - {o['name']} ({o['modality']})")
+    return "\n".join(lines) + "\n\n"
+
+
 def process_case(case_payload: dict) -> dict:
     """
     case_payload = {
         "patient": { name, birth_date, sex, height_cm, weight_kg,
                      conditions, chief_complaint, clinical_history },
         "exams": [ { "name", "modality", "exam_date", "image_paths": [...] } ],
-        "documents": [ { "name": str, "text": str } ]   # optional
+        "documents": [ { "name": str, "text": str } ],       # background docs (laudos, receitas)
+        "document_exams": [ { "name": str, "text": str } ],  # lab-result PDFs → full analysis
     }
     """
-    groq_key = os.environ.get("GROQ_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
     tavily_key = os.environ.get("TAVILY_API_KEY")
-    if not groq_key:
-        raise Exception("GROQ_API_KEY não configurada.")
+    if not openai_key:
+        raise Exception("OPENAI_API_KEY não configurada.")
 
     documents = case_payload.get("documents") or []
+    document_exams = case_payload.get("document_exams") or []
     patient_ctx = build_patient_context(case_payload.get("patient", {}))
     temp_files: List[str] = []
     exam_analyses = []
 
-    # ── Step 1: Document Reader Agent ────────────────────────────────────────
+    # ── Step 1: Document Reader Agent (background docs summary) ──────────────
     doc_summary = ""
     if documents:
         doc_summary = analyze_documents(documents, patient_ctx)
@@ -673,7 +684,19 @@ def process_case(case_payload: dict) -> dict:
         if doc_summary else ""
     )
 
+    # ── Build cross-exam reference list ──────────────────────────────────────
+    image_exam_names = [
+        {"name": e.get("name", "Exame de imagem"), "modality": e.get("modality", "N/A")}
+        for e in case_payload.get("exams", []) if e.get("image_paths")
+    ]
+    lab_exam_names = [
+        {"name": d.get("name", "Exame laboratorial"), "modality": "Laboratorial"}
+        for d in document_exams
+    ]
+    all_exam_names = image_exam_names + lab_exam_names
+
     try:
+        # ── Step 2: Analyze each image exam ──────────────────────────────────
         for exam in case_payload.get("exams", []):
             raw_paths = exam.get("image_paths", [])
             if not raw_paths:
@@ -691,12 +714,14 @@ def process_case(case_payload: dict) -> dict:
             temp_files.append(grid_path)
 
             specialty = detect_specialty(exam.get("modality", ""), exam.get("name", ""))
+            other_exams_section = _build_other_exams_section(all_exam_names, exam.get("name", ""))
             prompt = EXAM_PROMPT.format(
                 specialty_label=SPECIALTY_LABELS[specialty],
                 specialty_instructions=SPECIALTY_INSTRUCTIONS[specialty],
                 suggestion_instructions=SPECIALTY_SUGGESTION_INSTRUCTIONS.get(specialty, SPECIALTY_SUGGESTION_INSTRUCTIONS["default"]),
                 patient_context=patient_ctx,
                 doc_summary_section=doc_summary_section,
+                other_exams_section=other_exams_section,
                 exam_name=exam.get("name", "Exame sem nome"),
                 modality=exam.get("modality", "N/A"),
                 exam_date=exam.get("exam_date", "N/A"),
@@ -707,7 +732,7 @@ def process_case(case_payload: dict) -> dict:
             agent = Agent(
                 name=f"Agent-{specialty}",
                 role=SPECIALTY_LABELS[specialty],
-                model=Groq(id=ID_MODEL_VISION),
+                model=OpenAIChat(id=ID_MODEL_VISION),
                 markdown=True,
             )
             result = agent.run(prompt, images=[AgnoImage(filepath=grid_path)])
@@ -718,9 +743,41 @@ def process_case(case_payload: dict) -> dict:
                 "analysis": _fmt(result.content),
             })
 
+        # ── Step 3: Analyze each lab-result PDF as a standalone exam ─────────
+        for doc_exam in document_exams:
+            specialty = detect_specialty("", doc_exam.get("name", ""))
+            other_exams_section = _build_other_exams_section(all_exam_names, doc_exam.get("name", ""))
+            doc_prompt = DOC_ANALYSIS_PROMPT.format(
+                specialty_label=SPECIALTY_LABELS.get(specialty, SPECIALTY_LABELS["default"]),
+                specialty_instructions=SPECIALTY_INSTRUCTIONS.get(specialty, SPECIALTY_INSTRUCTIONS["default"]),
+                suggestion_instructions=SPECIALTY_SUGGESTION_INSTRUCTIONS.get(specialty, SPECIALTY_SUGGESTION_INSTRUCTIONS["default"]),
+                patient_ctx=patient_ctx + ("\n\n" + doc_summary_section if doc_summary_section else ""),
+                other_exams_section=other_exams_section,
+            )
+            full_prompt = (
+                doc_prompt
+                + f"\n\nCONTEÚDO DO EXAME LABORATORIAL ({doc_exam.get('name', '')}):\n"
+                + doc_exam.get("text", "")[:15000]
+            )
+            text_agent = Agent(
+                name=f"Agent-{specialty}-lab",
+                role=SPECIALTY_LABELS.get(specialty, SPECIALTY_LABELS["default"]),
+                model=OpenAIChat(id=ID_MODEL_TEXT),
+                markdown=True,
+            )
+            r = text_agent.run(full_prompt)
+            exam_analyses.append({
+                "exam": doc_exam.get("name", "Exame Laboratorial"),
+                "modality": "Laboratorial",
+                "specialty": specialty,
+                "analysis": _fmt(r.content),
+            })
+
+        # ── Step 4: Consolidate ───────────────────────────────────────────────
         if not exam_analyses:
             if not documents:
                 raise Exception("Nenhum exame ou documento encontrado para analisar.")
+            # Fallback: only background docs with no images or lab exams
             specialty_key = (case_payload.get("patient", {}).get("specialty") or "default")
             if specialty_key not in SPECIALTY_LABELS:
                 specialty_key = "default"
@@ -729,11 +786,12 @@ def process_case(case_payload: dict) -> dict:
                 specialty_instructions=SPECIALTY_INSTRUCTIONS[specialty_key],
                 suggestion_instructions=SPECIALTY_SUGGESTION_INSTRUCTIONS.get(specialty_key, SPECIALTY_SUGGESTION_INSTRUCTIONS["default"]),
                 patient_ctx=patient_ctx + ("\n\n" + doc_summary_section if doc_summary_section else ""),
+                other_exams_section="",
             )
             text_agent = Agent(
                 name=f"Agent-{specialty_key}-text",
                 role=SPECIALTY_LABELS[specialty_key],
-                model=Groq(id=ID_MODEL_TEXT),
+                model=OpenAIChat(id=ID_MODEL_TEXT),
                 markdown=True,
             )
             r = text_agent.run(doc_prompt)
@@ -748,7 +806,7 @@ def process_case(case_payload: dict) -> dict:
             consolidator = Agent(
                 name="Consolidation-Agent",
                 role="Médico especialista em diagnóstico multimodal",
-                model=Groq(id=ID_MODEL_TEXT),
+                model=OpenAIChat(id=ID_MODEL_TEXT),
                 markdown=True,
             )
             primary_specialty = exam_analyses[0].get("specialty", "default")
@@ -780,7 +838,7 @@ def process_case(case_payload: dict) -> dict:
              - Use revistas indexadas: NEJM, Lancet, JAMA, BMJ, UpToDate, diretrizes de sociedades médicas.
              - Formato: Autores. Título. Periódico. Ano;Vol(N):páginas. DOI quando disponível.
              - Inclua referências específicas para os achados mais relevantes do caso."""),
-            model=Groq(id=ID_MODEL_TEXT),
+            model=OpenAIChat(id=ID_MODEL_TEXT),
             tools=tools,
         )
         rr = researcher.run(

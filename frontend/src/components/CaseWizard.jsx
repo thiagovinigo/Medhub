@@ -1,12 +1,11 @@
 import React, { useState, useRef } from 'react';
 import {
-  ArrowRight, ArrowLeft, Plus, X, UploadCloud, FileSearch,
-  Stethoscope, Download, FileText,
+  ArrowRight, ArrowLeft, X, UploadCloud, FileSearch,
+  Stethoscope, Download, FileText, Image,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '');
-const MODALITIES = ['MR', 'CT', 'XR', 'US', 'PET', 'NM', 'Outro'];
 
 const RESULT_TABS = [
   { key: 'detalhada',    label: 'Análise Detalhada' },
@@ -16,6 +15,14 @@ const RESULT_TABS = [
   { key: 'sugestao',    label: 'Sugestão Médica' },
   { key: 'referencias', label: 'Referências' },
 ];
+
+const SPECIALTY_SUGGESTIONS = {
+  spine:     { label: 'Sugerir exercícios', type: 'exercise' },
+  msk:       { label: 'Sugerir fisioterapia / exercícios', type: 'exercise' },
+  endocrino: { label: 'Sugerir dieta', type: 'diet' },
+  nutri:     { label: 'Sugerir plano alimentar', type: 'diet' },
+  cardio:    { label: 'Sugerir hábitos saudáveis', type: 'lifestyle' },
+};
 
 function normTitle(s) {
   return (s || '').toLowerCase()
@@ -27,10 +34,17 @@ function parseMarkdownTabs(analysis, research) {
   const chunks = [];
   let cur = null;
   const lines = ((analysis || '') + '\n\n' + (research || '')).split('\n');
-  for (const line of lines) {
-    if (line.startsWith('## ')) {
+  for (let line of lines) {
+    const cleanLine = line.trim();
+    // Identifica ## Header, ### Header, ou **Header** (se for sozinho na linha)
+    let headerMatch = cleanLine.match(/^#{2,4}\s+(.*)$/);
+    if (!headerMatch) {
+      headerMatch = cleanLine.match(/^\*\*(.*?)\*\*$/);
+    }
+    
+    if (headerMatch) {
       if (cur) chunks.push(cur);
-      cur = { title: normTitle(line.slice(3)), lines: [] };
+      cur = { title: normTitle(headerMatch[1]), lines: [] };
     } else if (cur) {
       cur.lines.push(line);
     }
@@ -38,121 +52,32 @@ function parseMarkdownTabs(analysis, research) {
   if (cur) chunks.push(cur);
 
   const find = (...keys) => {
-    const c = chunks.find(c => keys.some(k => c.title.includes(k)));
-    return c ? c.lines.join('\n').trim() : '';
+    const c = chunks.filter(c => keys.some(k => c.title.includes(k)));
+    return c.length ? c.map(x => x.lines.join('\n').trim()).join('\n\n---\n\n') : '';
   };
 
-  const correlacaoBase = find('correlacao clinica', 'correlacao');
+  const correlacaoBase = find('correlacao clinica', 'correlacao', 'achados criticos');
   const consolidado = find('diagnostico consolidado', 'recomendacoes');
+  
   return {
-    detalhada:    find('analise detalhada', 'analise tecnica', 'analise integrada'),
+    detalhada:    find('analise detalhada', 'analise tecnica', 'analise integrada', 'informacoes extraidas', 'analise', 'achados'),
     correlacao:   [correlacaoBase, consolidado].filter(Boolean).join('\n\n---\n\n'),
-    profissional: find('diagnostico profissional', 'impressao diagnostica'),
-    leigo:        find('linguagem simples', 'linguagem leiga'),
+    profissional: find('diagnostico profissional', 'impressao diagnostica', 'diagnostico'),
+    leigo:        find('linguagem simples', 'linguagem leiga', 'simples', 'leigo'),
     sugestao:     find('sugestao medica', 'sugestao'),
     referencias:  find('referencias bibliograficas', 'referencias'),
   };
 }
 
-const SPECIALTY_SUGGESTIONS = {
-  spine:     { label: 'Sugerir exercícios', type: 'exercise' },
-  msk:       { label: 'Sugerir fisioterapia / exercícios', type: 'exercise' },
-  endocrino: { label: 'Sugerir dieta', type: 'diet' },
-  nutri:     { label: 'Sugerir plano alimentar', type: 'diet' },
-  cardio:    { label: 'Sugerir hábitos saudáveis', type: 'lifestyle' },
-};
-
-function guessExamName(files) {
-  if (!files || files.length === 0) return '';
-  const name = files[0].name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ').trim();
-  return name.charAt(0).toUpperCase() + name.slice(1);
-}
-
-function newExam(card) {
-  return { name: '', modality: card?.suggestedModality || '', exam_date: '', files: [] };
-}
-
-function ExamBlock({ exam, index, total, onChange, onRemove }) {
-  const fileRef = useRef(null);
-  const addFiles = (newFiles) =>
-    onChange({ ...exam, files: [...exam.files, ...Array.from(newFiles)] });
-
-  return (
-    <div className="exam-block">
-      <div className="exam-block-header">
-        <span className="exam-block-title">Exame {index + 1}</span>
-        {total > 1 && (
-          <button type="button" className="icon-btn" onClick={onRemove}><X size={16} /></button>
-        )}
-      </div>
-
-      <div className="form-row">
-        <div className="form-group" style={{ flex: 2 }}>
-          <label>Nome do exame</label>
-          <input className="form-input" placeholder="Ex: RM Coluna Cervical"
-            value={exam.name} onChange={e => onChange({ ...exam, name: e.target.value })} />
-        </div>
-        <div className="form-group">
-          <label>Tipo</label>
-          <select className="form-input" value={exam.modality}
-            onChange={e => onChange({ ...exam, modality: e.target.value })}>
-            <option value="">Selecionar...</option>
-            {MODALITIES.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </div>
-        <div className="form-group">
-          <label>Data</label>
-          <input type="date" className="form-input" value={exam.exam_date}
-            onChange={e => onChange({ ...exam, exam_date: e.target.value })} />
-        </div>
-      </div>
-
-      {exam.files.length > 0 ? (
-        <div className="exam-files-list">
-          {exam.files.map((f, i) => (
-            <div key={i} className="exam-file-chip">
-              <FileSearch size={12} /><span>{f.name}</span>
-              <button type="button"
-                onClick={() => onChange({ ...exam, files: exam.files.filter((_, j) => j !== i) })}>
-                <X size={11} />
-              </button>
-            </div>
-          ))}
-          <button type="button" className="exam-add-more-btn"
-            onClick={() => fileRef.current?.click()}>
-            <Plus size={12} /> adicionar mais imagens
-          </button>
-          <input type="file" ref={fileRef} multiple className="hidden-input"
-            accept="image/jpeg,image/png,image/jpg,image/bmp,.dcm"
-            onChange={e => addFiles(e.target.files)} />
-        </div>
-      ) : (
-        <div className="exam-upload-area"
-          onDragOver={e => e.preventDefault()}
-          onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
-          onClick={() => fileRef.current?.click()}>
-          <UploadCloud size={24} style={{ color: '#3b82f6', marginBottom: 4 }} />
-          <span className="upload-text">Arraste ou <span>clique para selecionar</span></span>
-          <span className="upload-formats">JPG · PNG · DICOM (.dcm)</span>
-          <input type="file" ref={fileRef} multiple className="hidden-input"
-            accept="image/jpeg,image/png,image/jpg,image/bmp,.dcm"
-            onChange={e => addFiles(e.target.files)} />
-        </div>
-      )}
-    </div>
-  );
-}
+const isDoc = (f) => /\.(pdf|doc|docx)$/i.test(f.name);
 
 export default function CaseWizard({ token, patient, specialty, onBack }) {
   const card = specialty?.key !== undefined ? specialty : null;
 
   const [complaint, setComplaint] = useState('');
-  const [exams, setExams] = useState([newExam(card)]);
-  const [docFiles, setDocFiles] = useState([]);
-  const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const docRef = useRef(null);
-  const centralFileRef = useRef(null);
-  const [classifying, setClassifying] = useState(false);
+  const [allFiles, setAllFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [results, setResults] = useState(null);
@@ -161,87 +86,29 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
   const [suggestionLoading, setSuggestionLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('detalhada');
 
-  const updateExam = (i, val) => setExams(prev => prev.map((e, idx) => idx === i ? val : e));
-  const removeExam = (i) => setExams(prev => prev.filter((_, idx) => idx !== i));
+  const fileRef = useRef(null);
 
-  // Each drag-drop: if only 1 file → add directly; if multiple → call classification agent
-  const handleCentralDrop = async (rawFiles) => {
-    const files = Array.from(rawFiles);
-    if (files.length === 0) return;
-
-    const isDoc = (f) => /\.(pdf|doc|docx)$/i.test(f.name);
-
-    // Single file: skip agent, add directly
-    if (files.length === 1) {
-      if (isDoc(files[0])) {
-        setDocFiles(prev => [...prev, files[0]]);
-      } else {
-        const autoName = guessExamName(files);
-        setExams(prev => {
-          if (prev.length === 1 && prev[0].files.length === 0)
-            return [{ ...prev[0], files, name: prev[0].name || autoName }];
-          return [...prev, { name: autoName, modality: card?.suggestedModality || '', exam_date: '', files }];
-        });
-      }
-      return;
-    }
-
-    // Multiple files: send to vision classification agent
-    setClassifying(true);
-    setError('');
-    try {
-      const formData = new FormData();
-      files.forEach(f => formData.append('files', f));
-
-      const res = await fetch(`${API}/api/classify-files`, {
-        method: 'POST',
-        body: formData,
-      });
-      if (!res.ok) throw new Error('classify failed');
-      const { exams: groups = [], document_indices: docIdx = [] } = await res.json();
-
-      // Apply documents
-      const newDocs = docIdx.map(i => files[i]).filter(Boolean);
-      if (newDocs.length > 0) setDocFiles(prev => [...prev, ...newDocs]);
-
-      // Apply exam groups
-      const newExams = groups
-        .filter(g => g.indices?.length > 0)
-        .map(g => ({
-          name: g.name || guessExamName(g.indices.map(i => files[i]).filter(Boolean)),
-          modality: g.modality || card?.suggestedModality || '',
-          exam_date: '',
-          files: g.indices.map(i => files[i]).filter(Boolean),
-        }));
-
-      if (newExams.length > 0) {
-        setExams(prev => {
-          const isEmpty = prev.length === 1 && prev[0].files.length === 0;
-          return isEmpty ? newExams : [...prev, ...newExams];
-        });
-      }
-    } catch {
-      // Fallback: images → one exam, docs → docFiles
-      const docs = files.filter(isDoc);
-      const imgs = files.filter(f => !isDoc(f));
-      if (docs.length > 0) setDocFiles(prev => [...prev, ...docs]);
-      if (imgs.length > 0) {
-        const autoName = guessExamName(imgs);
-        setExams(prev => {
-          if (prev.length === 1 && prev[0].files.length === 0)
-            return [{ ...prev[0], files: imgs, name: autoName }];
-          return [...prev, { name: autoName, modality: card?.suggestedModality || '', exam_date: '', files: imgs }];
-        });
-      }
-    } finally {
-      setClassifying(false);
-    }
+  const addFiles = (incoming) => {
+    const arr = Array.from(incoming);
+    setAllFiles(prev => {
+      const existingNames = new Set(prev.map(f => f.name));
+      return [...prev, ...arr.filter(f => !existingNames.has(f.name))];
+    });
   };
 
-  const hasFiles = exams.some(e => e.files.length > 0);
-  const filledExams = exams.filter(e => e.files.length > 0).length;
-  const canAnalyze = hasFiles || docFiles.length > 0;
+  const removeFile = (i) => setAllFiles(prev => prev.filter((_, j) => j !== i));
 
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    addFiles(e.dataTransfer.files);
+  };
+
+  const imgFiles = allFiles.filter(f => !isDoc(f));
+  const docFiles = allFiles.filter(f => isDoc(f));
+  const canAnalyze = allFiles.length > 0;
+
+  // ── Suggestion ───────────────────────────────────────────────────────────────
   const handleSuggest = async () => {
     const config = SPECIALTY_SUGGESTIONS[card?.key];
     if (!config || !results) return;
@@ -267,7 +134,9 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
     }
   };
 
+  // ── Analyze ──────────────────────────────────────────────────────────────────
   const handleAnalyze = async () => {
+    if (!canAnalyze) return;
     setLoading(true);
     setError('');
     try {
@@ -278,25 +147,22 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
         clinical_history: complaint,
         specialty: card?.key || null,
       }));
-
-      const examsMeta = [];
-      exams.forEach(exam => {
-        if (exam.files.length > 0) {
-          examsMeta.push({
-            name: exam.name.trim() || card?.suggestedExams?.[0] || `Exame ${examsMeta.length + 1}`,
-            modality: exam.modality,
-            exam_date: exam.exam_date,
-            file_count: exam.files.length,
-          });
-          exam.files.forEach(f => formData.append('files', f));
-        }
-      });
-      formData.append('exams_json', JSON.stringify(examsMeta));
-      docFiles.forEach(f => formData.append('doc_files', f));
+      allFiles.forEach(f => formData.append('files', f));
 
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const res = await fetch(`${API}/api/cases/analyze`, { method: 'POST', body: formData, headers });
-      if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'Erro na análise'); }
+      if (!res.ok) {
+        let msg = `Erro ${res.status}`;
+        try {
+          const d = await res.json();
+          if (typeof d.detail === 'string') msg = d.detail;
+          else if (Array.isArray(d.detail)) msg = d.detail.map(e => e.msg || JSON.stringify(e)).join(' | ');
+          else if (d.detail) msg = JSON.stringify(d.detail);
+          else if (d.message) msg = d.message;
+          console.error('[analyze] backend error:', d);
+        } catch { /* response not JSON */ }
+        throw new Error(msg);
+      }
       setResults(await res.json());
     } catch (err) {
       setError(err.message);
@@ -305,6 +171,7 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
     }
   };
 
+  // ── PDF download ─────────────────────────────────────────────────────────────
   const handleDownloadPDF = async () => {
     if (!results) return;
     setPdfLoading(true);
@@ -332,6 +199,7 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
 
   // ── Results ──────────────────────────────────────────────────────────────────
   if (results) {
+    const tabs = parseMarkdownTabs(results.analysis, results.research);
     return (
       <div className="wizard-results">
         <div className="wizard-results-header">
@@ -345,7 +213,11 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
                 {suggestionLoading ? 'Gerando...' : SPECIALTY_SUGGESTIONS[card.key].label}
               </button>
             )}
-            <button className="btn-ghost" onClick={() => { setResults(null); setSuggestion(null); setActiveTab('detalhada'); onBack?.(); }}>
+            <button className="btn-ghost" onClick={() => {
+              setResults(null); setSuggestion(null);
+              setActiveTab('detalhada'); setAllFiles([]);
+              onBack?.();
+            }}>
               Nova consulta
             </button>
             <button className="btn-secondary" onClick={handleDownloadPDF} disabled={pdfLoading}>
@@ -353,58 +225,55 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
             </button>
           </div>
         </div>
+
         {card && (
           <div className="case-badge-row">
             <span className="badge" style={{ background: card.bg, color: card.color, border: `1px solid ${card.border}` }}>
               {card.emoji} {card.label}
             </span>
             {results.exams_processed > 0 && (
-              <span className="badge-gray">{results.exams_processed} exame{results.exams_processed > 1 ? 's' : ''} analisado{results.exams_processed > 1 ? 's' : ''}</span>
+              <span className="badge-gray">
+                {results.exams_processed} exame{results.exams_processed > 1 ? 's' : ''} analisado{results.exams_processed > 1 ? 's' : ''}
+              </span>
             )}
           </div>
         )}
-        {(() => {
-          const tabs = parseMarkdownTabs(results.analysis, results.research);
-          const content = tabs[activeTab] || '';
-          return (
-            <>
-              <div className="results-tabs">
-                {RESULT_TABS.map(t => (
-                  <button key={t.key}
-                    className={`results-tab-btn${activeTab === t.key ? ' active' : ''}`}
-                    onClick={() => setActiveTab(t.key)}>
-                    {t.label}
-                    {t.note && <span className="tab-note">{t.note}</span>}
-                  </button>
-                ))}
-              </div>
-              <div className="results-tab-content">
-                {!content ? (
-                  <p className="tab-empty">Seção não disponível para este tipo de análise.</p>
-                ) : (
-                  <div className="markdown-body">
-                    <ReactMarkdown>{content}</ReactMarkdown>
-                    {activeTab === 'sugestao' && suggestionLoading && (
-                      <div className="loading-state" style={{ minHeight: 120, marginTop: '1.5rem' }}>
-                        <div className="spinner" />
-                        <div className="loading-text">Gerando sugestão personalizada...</div>
-                      </div>
-                    )}
-                    {activeTab === 'sugestao' && suggestion && (
-                      <>
-                        <hr className="markdown-divider" />
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '1rem' }}>
-                          <span style={{ fontSize: '0.75rem', color: '#22c55e', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Detalhamento adicional gerado pela IA</span>
-                        </div>
-                        <ReactMarkdown>{suggestion}</ReactMarkdown>
-                      </>
-                    )}
+
+        <div className="results-tabs">
+          {RESULT_TABS.map(t => (
+            <button key={t.key}
+              className={`results-tab-btn${activeTab === t.key ? ' active' : ''}`}
+              onClick={() => setActiveTab(t.key)}>
+              {t.label}
+              {t.note && <span className="tab-note">{t.note}</span>}
+            </button>
+          ))}
+        </div>
+
+        <div className="results-tab-content">
+          {!tabs[activeTab] ? (
+            <p className="tab-empty">Seção não disponível para este tipo de análise.</p>
+          ) : (
+            <div className="markdown-body">
+              <ReactMarkdown>{tabs[activeTab]}</ReactMarkdown>
+              {activeTab === 'sugestao' && suggestionLoading && (
+                <div className="loading-state" style={{ minHeight: 120, marginTop: '1.5rem' }}>
+                  <div className="spinner" />
+                  <div className="loading-text">Gerando sugestão personalizada...</div>
+                </div>
+              )}
+              {activeTab === 'sugestao' && suggestion && (
+                <>
+                  <hr className="markdown-divider" />
+                  <div style={{ fontSize: '0.75rem', color: '#22c55e', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '1rem' }}>
+                    Detalhamento adicional gerado pela IA
                   </div>
-                )}
-              </div>
-            </>
-          );
-        })()}
+                  <ReactMarkdown>{suggestion}</ReactMarkdown>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -419,7 +288,7 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
             {card ? `Agente de ${card.label} analisando seus exames...` : 'Analisando seus exames...'}
           </div>
           <div className="loading-subtext">
-            Processando {filledExams} exame{filledExams > 1 ? 's' : ''} · Correlacionando achados · Preparando segunda opinião
+            Classificando {allFiles.length} arquivo{allFiles.length > 1 ? 's' : ''} · Correlacionando achados · Preparando segunda opinião
           </div>
         </div>
       </div>
@@ -446,102 +315,78 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
           <div className="form-group">
             <label>O que aconteceu?</label>
             <div className="form-hint">
-              Conte o motivo da consulta, o que o médico disse, seus sintomas ou sua dúvida
+              Conte o motivo da consulta, seus sintomas ou dúvida sobre os resultados
             </div>
-            <textarea className="form-textarea" rows={4}
-              placeholder={card?.complaintHint || 'Ex: Fui ao médico com dor no joelho, ele pediu uma RM e uma radiografia. Quero entender os resultados.'}
+            <textarea className="form-textarea" rows={3}
+              placeholder={card?.complaintHint || 'Ex: Fui ao médico com dor no joelho, ele pediu uma RM e um raio-X. Quero entender os resultados.'}
               value={complaint}
               onChange={e => setComplaint(e.target.value)} />
           </div>
 
-          {/* Zona central de drop */}
-          <div>
-            <div className="form-group" style={{ marginBottom: 8 }}>
-              <label>Seus exames e imagens</label>
-              <div className="form-hint">
-                Arraste cada exame separadamente — cada drop cria um exame automaticamente
-              </div>
+          {/* Drop zone — aceita tudo de uma vez */}
+          <div className="form-group">
+            <label>Seus exames e documentos</label>
+            <div className="form-hint">
+              Adicione todos os arquivos de uma vez — imagens e PDFs juntos
             </div>
 
             <div
-              className={`central-drop-zone${isDraggingOver ? ' dragging' : ''}`}
-              onDragOver={e => { e.preventDefault(); setIsDraggingOver(true); }}
-              onDragLeave={() => setIsDraggingOver(false)}
-              onDrop={e => { e.preventDefault(); setIsDraggingOver(false); handleCentralDrop(e.dataTransfer.files); }}
-              onClick={() => centralFileRef.current?.click()}
+              className={`central-drop-zone${isDragging ? ' dragging' : ''}`}
+              onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileRef.current?.click()}
             >
-              <UploadCloud size={32} style={{ color: isDraggingOver ? '#3b82f6' : '#475569', marginBottom: 6 }} />
-              {!hasFiles ? (
-                <>
-                  <span className="upload-text">Arraste as imagens do <strong>1º exame</strong> aqui</span>
-                  <span className="upload-formats">JPG · PNG · DICOM (.dcm) · vários arquivos aceitos</span>
-                </>
-              ) : (
-                <>
-                  <span className="upload-text">
-                    Arraste o <strong>{filledExams + 1}º exame</strong> aqui para adicionar automaticamente
-                  </span>
-                  <span className="upload-formats">{filledExams} exame{filledExams > 1 ? 's' : ''} adicionado{filledExams > 1 ? 's' : ''} · solte mais para criar novos</span>
-                </>
-              )}
-              <input type="file" ref={centralFileRef} multiple className="hidden-input"
-                accept="image/jpeg,image/png,image/jpg,image/bmp,.dcm"
-                onChange={e => { handleCentralDrop(e.target.files); e.target.value = ''; }} />
-            </div>
-
-            {/* Estado de classificação */}
-            {classifying && (
-              <div className="classifying-state">
-                <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
-                <span>Agente classificando arquivos...</span>
-              </div>
-            )}
-
-            {/* Blocos de exame */}
-            {!classifying && hasFiles && (
-              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {exams.map((exam, i) => (
-                  <ExamBlock key={i} exam={exam} index={i} total={exams.length}
-                    onChange={val => updateExam(i, val)}
-                    onRemove={() => removeExam(i)} />
-                ))}
-                <button type="button" className="btn-add-exam"
-                  onClick={() => setExams(prev => [...prev, newExam(card)])}>
-                  <Plus size={16} /> Adicionar exame manualmente
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Documentos */}
-          <div className="doc-upload-section" style={{ marginTop: 0 }}>
-            <div className="doc-upload-label">
-              <FileText size={15} />
-              <span>Receitas e documentos</span>
-              <span className="form-hint" style={{ margin: 0 }}>
-                Laudo do médico, pedido de exame, resultado de sangue (PDF · DOC)
+              <UploadCloud size={32} style={{ color: isDragging ? '#3b82f6' : '#475569', marginBottom: 6 }} />
+              <span className="upload-text">
+                {allFiles.length === 0
+                  ? <>Arraste <strong>todos os arquivos</strong> aqui de uma vez</>
+                  : <>{allFiles.length} arquivo{allFiles.length > 1 ? 's' : ''} adicionado{allFiles.length > 1 ? 's' : ''} — arraste mais ou clique</>
+                }
               </span>
+              <span className="upload-formats">
+                Imagens (JPG, PNG, DICOM) · Documentos (PDF, DOC) · Exames de sangue
+              </span>
+              <input
+                type="file" ref={fileRef} multiple className="hidden-input"
+                accept="image/jpeg,image/png,image/jpg,image/bmp,.dcm,.pdf,.doc,.docx"
+                onChange={e => { addFiles(e.target.files); e.target.value = ''; }}
+              />
             </div>
-            <div className="doc-upload-area"
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => { e.preventDefault(); setDocFiles(prev => [...prev, ...Array.from(e.dataTransfer.files)]); }}
-              onClick={() => docRef.current?.click()}>
-              <UploadCloud size={22} style={{ color: '#8b5cf6' }} />
-              <span>Arraste documentos ou <span>clique para selecionar</span></span>
-              <input type="file" ref={docRef} multiple className="hidden-input"
-                accept=".pdf,.doc,.docx"
-                onChange={e => setDocFiles(prev => [...prev, ...Array.from(e.target.files)])} />
-            </div>
-            {docFiles.length > 0 && (
-              <div className="exam-files-list">
-                {docFiles.map((f, i) => (
-                  <div key={i} className="exam-file-chip doc-chip">
-                    <FileText size={12} /><span>{f.name}</span>
-                    <button type="button" onClick={() => setDocFiles(prev => prev.filter((_, j) => j !== i))}>
-                      <X size={11} />
-                    </button>
+
+            {/* Lista de arquivos */}
+            {allFiles.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                {imgFiles.length > 0 && (
+                  <div style={{ marginBottom: 6 }}>
+                    <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                      Imagens ({imgFiles.length})
+                    </div>
+                    <div className="exam-files-list">
+                      {allFiles.map((f, i) => !isDoc(f) && (
+                        <div key={i} className="exam-file-chip">
+                          <Image size={12} /><span>{f.name}</span>
+                          <button type="button" onClick={() => removeFile(i)}><X size={11} /></button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                ))}
+                )}
+                {docFiles.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                      Documentos e exames laboratoriais ({docFiles.length})
+                    </div>
+                    <div className="exam-files-list">
+                      {allFiles.map((f, i) => isDoc(f) && (
+                        <div key={i} className="exam-file-chip doc-chip">
+                          <FileText size={12} /><span>{f.name}</span>
+                          <button type="button" onClick={() => removeFile(i)}><X size={11} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -552,9 +397,15 @@ export default function CaseWizard({ token, patient, specialty, onBack }) {
       {error && <div className="error-box" style={{ margin: '0 1.5rem 1rem' }}>⚠️ {error}</div>}
 
       <div className="wizard-footer">
-        <div style={{ flex: 1 }} />
-        <button className="btn-primary" style={{ width: 'auto', padding: '0.75rem 2.5rem' }}
-          onClick={handleAnalyze} disabled={!canAnalyze || loading}>
+        <div style={{ flex: 1, fontSize: '0.8rem', color: '#64748b' }}>
+          {allFiles.length > 0
+            ? `${allFiles.length} arquivo${allFiles.length > 1 ? 's' : ''} · a IA vai classificar e analisar tudo automaticamente`
+            : 'Adicione ao menos um arquivo para analisar'}
+        </div>
+        <button
+          className="btn-primary" style={{ width: 'auto', padding: '0.75rem 2.5rem' }}
+          onClick={handleAnalyze} disabled={!canAnalyze || loading}
+        >
           Analisar com IA <ArrowRight size={18} />
         </button>
       </div>

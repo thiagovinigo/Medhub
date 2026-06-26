@@ -24,8 +24,8 @@ def extract_text(filepath: str) -> str:
 
 def _pdf_ocr_via_vision(filepath: str) -> str:
     """Render PDF pages as images and OCR with the vision model."""
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if not groq_key:
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_key:
         return ""
     tmp_imgs = []
     try:
@@ -39,7 +39,7 @@ def _pdf_ocr_via_vision(filepath: str) -> str:
             pix.save(tmp_path)
             tmp_imgs.append(tmp_path)
 
-            ocr_text = _vision_ocr_page(tmp_path, groq_key)
+            ocr_text = _vision_ocr_page(tmp_path, openai_key)
             if ocr_text:
                 pages_text.append(f"[Página {page_num + 1}]\n{ocr_text}")
         doc.close()
@@ -56,15 +56,15 @@ def _pdf_ocr_via_vision(filepath: str) -> str:
                 pass
 
 
-def _vision_ocr_page(image_path: str, groq_key: str) -> str:
+def _vision_ocr_page(image_path: str, openai_key: str) -> str:
     """Send one page image to the vision model and extract text."""
     try:
         from agno.agent import Agent
-        from agno.models.groq import Groq
+        from agno.models.openai import OpenAIChat
         from agno.media import Image as AgnoImage
         agent = Agent(
             name="OCR-Agent",
-            model=Groq(id="meta-llama/llama-4-scout-17b-16e-instruct"),
+            model=OpenAIChat(id="gpt-4o"),
             markdown=False,
         )
         result = agent.run(

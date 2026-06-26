@@ -6,13 +6,13 @@ load_dotenv(dotenv_path="../.env")
 
 from PIL import Image as PILImage
 from agno.agent import Agent
-from agno.models.groq import Groq
+from agno.models.openai import OpenAIChat
 from agno.media import Image as AgnoImage
 from agno.tools.tavily import TavilyTools
 from textwrap import dedent
 
-ID_MODEL_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
-ID_MODEL_TEXT = "llama-3.3-70b-versatile"
+ID_MODEL_VISION = "gpt-4o"
+ID_MODEL_TEXT = "gpt-4o-mini"
 
 prompt_analysis = """
 Você é um especialista altamente qualificado em imagens médicas, com profundo conhecimento em diagnóstico por imagem.
@@ -115,17 +115,17 @@ def format_res(res: str, return_thinking: bool = False) -> str:
 
 
 def process_image(file_path: str) -> dict:
-    """Executa o pipeline completo: análise + pesquisa usando Groq."""
-    groq_key = os.environ.get("GROQ_API_KEY")
+    """Executa o pipeline completo: análise + pesquisa usando OpenAI."""
+    openai_key = os.environ.get("OPENAI_API_KEY")
     tavily_key = os.environ.get("TAVILY_API_KEY")
 
-    if not groq_key:
-        raise Exception("Chaves de API do Groq ausentes. O sistema precisa do Llama para rodar.")
+    if not openai_key:
+        raise Exception("Chaves de API da OpenAI ausentes. O sistema precisa do GPT para rodar.")
 
     med_agent = Agent(
         name="Medical Image Agent",
         role="Especialista em imagens médicas",
-        model=Groq(id=ID_MODEL_VISION),
+        model=OpenAIChat(id=ID_MODEL_VISION),
         markdown=True,
     )
 
@@ -137,7 +137,7 @@ def process_image(file_path: str) -> dict:
             """Você é um pesquisador médico responsável por buscar informações complementares sobre os achados identificados na imagem médica.
             Utilize ferramentas de busca (se ativas) para encontrar literatura médica recente, protocolos de tratamento padrão e avanços tecnológicos relevantes."""
         ),
-        model=Groq(id=ID_MODEL_TEXT),
+        model=OpenAIChat(id=ID_MODEL_TEXT),
         tools=tools,
     )
 
@@ -176,9 +176,9 @@ Formato obrigatório:
 
 def _vision_classify_single(image_path: str, filename: str) -> dict:
     """Calls vision model to identify modality and region of one image."""
-    groq_key = os.environ.get("GROQ_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
     fallback = {"modality": "", "region": "", "exam_name": _clean_filename(filename)}
-    if not groq_key:
+    if not openai_key:
         return fallback
     temp_path = None
     try:
@@ -186,7 +186,7 @@ def _vision_classify_single(image_path: str, filename: str) -> dict:
         agno_img = AgnoImage(filepath=temp_path)
         agent = Agent(
             name="Image Classifier",
-            model=Groq(id=ID_MODEL_VISION),
+            model=OpenAIChat(id=ID_MODEL_VISION),
             markdown=False,
         )
         result = agent.run(_VISION_CLASSIFY_PROMPT, images=[agno_img])
@@ -216,17 +216,45 @@ def _clean_filename(filename: str) -> str:
     return filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip().capitalize() or "Exame"
 
 
+_LAB_KEYWORDS = {
+    "hemograma", "sangue", "laborat", "bioquim", "lipidio", "lipídio",
+    "colesterol", "glicemia", "trigliceride", "triglicéride", "urina",
+    "urinalise", "hematol", "sorolog", "creatinina", "ureia",
+    "hormônio", "hormonio", "tsh", "insulina", "hba1c", "vitamina",
+    "ferritina", "plaqueta", "leucocito", "leucócito", "resultado",
+    "exame lab", "analise", "painel", "pcr", "eletroforese",
+}
+
+
+def _is_lab_document(filename: str) -> bool:
+    name = filename.lower().replace("_", " ").replace("-", " ")
+    return any(kw in name for kw in _LAB_KEYWORDS)
+
+
 def classify_files_with_vision(file_entries: list) -> dict:
     """
     Classifies uploaded files using the vision model for images.
     file_entries: [{"index": int, "filename": str, "path": str, "is_document": bool}]
-    Returns: {"exams": [{"name": str, "modality": str, "indices": [int]}], "document_indices": [int]}
+    Returns:
+      {
+        "exams": [{"name", "modality", "indices"}],
+        "document_indices": [int],        # background docs (laudos, receitas)
+        "document_exam_indices": [int],   # lab-result PDFs → analyzed as exams
+      }
     """
-    doc_indices = [e["index"] for e in file_entries if e["is_document"]]
+    doc_indices = []
+    doc_exam_indices = []
+    for e in file_entries:
+        if e["is_document"]:
+            if _is_lab_document(e["filename"]):
+                doc_exam_indices.append(e["index"])
+            else:
+                doc_indices.append(e["index"])
+
     image_entries = [e for e in file_entries if not e["is_document"]]
 
     if not image_entries:
-        return {"exams": [], "document_indices": doc_indices}
+        return {"exams": [], "document_indices": doc_indices, "document_exam_indices": doc_exam_indices}
 
     # Classify each image with vision model
     classified = []
@@ -235,17 +263,20 @@ def classify_files_with_vision(file_entries: list) -> dict:
         info["index"] = entry["index"]
         classified.append(info)
 
-    # Group by (modality, region) — same combo = same exam
+    # Group by (modality, region).
+    # If either is empty the model couldn't classify → treat as its own exam.
     groups: dict = {}
     for c in classified:
-        key = f"{c.get('modality','').upper()}_{c.get('region','').lower()}"
+        mod = (c.get("modality") or "").upper().strip()
+        reg = (c.get("region") or "").lower().strip()
+        key = f"{mod}_{reg}" if (mod and reg) else f"_unclassified_{c['index']}"
         if key not in groups:
             groups[key] = {
-                "name": c.get("exam_name") or f"{c.get('modality','')} {c.get('region','')}".strip(),
-                "modality": c.get("modality", ""),
+                "name": c.get("exam_name") or f"{mod} {reg}".strip() or _clean_filename(c.get("filename", "")),
+                "modality": mod,
                 "indices": [],
             }
         groups[key]["indices"].append(c["index"])
 
     exams = list(groups.values())
-    return {"exams": exams, "document_indices": doc_indices}
+    return {"exams": exams, "document_indices": doc_indices, "document_exam_indices": doc_exam_indices}

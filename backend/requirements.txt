@@ -5,7 +5,8 @@ agno
 python-dotenv
 Pillow
 tavily-python
-groq
+openai
+supabase
 pydicom
 numpy
 fpdf2

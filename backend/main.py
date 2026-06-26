@@ -12,6 +12,20 @@ import json
 import uuid
 import traceback
 from supabase import create_client, Client
+
+import httpx
+_client_init = httpx.Client.__init__
+def new_client_init(self, *args, **kwargs):
+    kwargs['verify'] = False
+    _client_init(self, *args, **kwargs)
+httpx.Client.__init__ = new_client_init
+
+_async_client_init = httpx.AsyncClient.__init__
+def new_async_client_init(self, *args, **kwargs):
+    kwargs['verify'] = False
+    _async_client_init(self, *args, **kwargs)
+httpx.AsyncClient.__init__ = new_async_client_init
+
 load_dotenv(dotenv_path="../.env")
 
 from agents import process_image, classify_files_with_vision
@@ -46,6 +60,8 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    traceback.print_exc()
     return JSONResponse(
         status_code=500,
         content={"detail": str(exc), "type": type(exc).__name__},
@@ -181,8 +197,8 @@ async def analyze(
     user: Optional[User] = Depends(get_optional_user),
     db: Session = Depends(get_db),
 ):
-    if not os.environ.get("GROQ_API_KEY"):
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY não configurada.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada.")
     allowed = ["jpg", "jpeg", "png", "bmp", "gif", "dcm"]
     ext = file.filename.split(".")[-1].lower()
     if ext not in allowed:
@@ -270,8 +286,8 @@ async def classify_files(files: List[UploadFile] = File(...)):
 
 @app.post("/api/suggest")
 def suggest(req: SuggestRequest):
-    if not os.environ.get("GROQ_API_KEY"):
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY não configurada.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada.")
     try:
         result = generate_suggestion(
             specialty=req.specialty,
@@ -408,65 +424,83 @@ def list_cases(user: User = Depends(get_required_user), db: Session = Depends(ge
 @app.post("/api/cases/analyze")
 async def analyze_case(
     patient_json: str = Form(...),
-    exams_json: str = Form(...),
     files: Optional[List[UploadFile]] = File(default=None),
-    doc_files: Optional[List[UploadFile]] = File(default=None),
     user: Optional[User] = Depends(get_optional_user),
     db: Session = Depends(get_db),
 ):
     """
     Analyzes a complete clinical case.
-    - patient_json: JSON with patient profile
-    - exams_json: JSON array of {name, modality, exam_date, file_count}
-    - files: all images flattened in order (exam0_files, exam1_files, ...)
+    - patient_json: JSON with patient profile + chief_complaint + specialty
+    - files: ALL files flat (images + PDFs) — backend classifies and groups automatically
     """
-    if not os.environ.get("GROQ_API_KEY"):
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY não configurada.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY não configurada.")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="Nenhum arquivo enviado.")
 
     try:
         patient_data = json.loads(patient_json)
-        exams_meta = json.loads(exams_json)
     except Exception:
-        raise HTTPException(status_code=400, detail="JSON inválido em patient_json ou exams_json.")
+        raise HTTPException(status_code=400, detail="JSON inválido em patient_json.")
 
     tmp_paths: List[str] = []
     try:
-        # Write all files to temp
-        all_paths: List[str] = []
-        for f in (files or []):
-            ext = f.filename.split(".")[-1].lower()
+        # Write all files to temp and build file_entries for classifier
+        file_entries = []
+        for i, f in enumerate(files):
+            ext = (f.filename or "file").split(".")[-1].lower()
+            is_doc = ext in {"pdf", "doc", "docx"}
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
                 tmp.write(await f.read())
-                all_paths.append(tmp.name)
                 tmp_paths.append(tmp.name)
+            file_entries.append({
+                "index": i,
+                "filename": f.filename or f"arquivo_{i}",
+                "path": tmp_paths[-1],
+                "is_document": is_doc,
+            })
 
-        # Distribute paths to exams according to file_count
+        # Classify all files: vision for images, filename heuristic for PDFs
+        classification = classify_files_with_vision(file_entries)
+        exams_groups    = classification.get("exams", [])
+        doc_indices     = classification.get("document_indices", [])
+        doc_exam_indices = classification.get("document_exam_indices", [])
+
+        # Build image exam payloads from classified groups
         exams_payload = []
-        idx = 0
-        for em in exams_meta:
-            count = em.get("file_count", 0)
-            exam_paths = all_paths[idx: idx + count]
-            idx += count
-            if exam_paths:
+        for group in exams_groups:
+            image_paths = [tmp_paths[i] for i in group.get("indices", []) if i < len(tmp_paths)]
+            if image_paths:
                 exams_payload.append({
-                    "name": em.get("name", ""),
-                    "modality": em.get("modality", ""),
-                    "exam_date": em.get("exam_date", ""),
-                    "image_paths": exam_paths,
+                    "name": group.get("name", "Exame"),
+                    "modality": group.get("modality", ""),
+                    "exam_date": "",
+                    "image_paths": image_paths,
                 })
 
-        # Extract text from uploaded documents (PDF/DOCX)
+        # Extract text from background docs (laudos, receitas, pedidos)
         documents = []
-        for df in (doc_files or []):
-            ext = df.filename.split(".")[-1].lower()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-                tmp.write(await df.read())
-                tmp_paths.append(tmp.name)
-                text = extract_text(tmp.name)
+        for i in doc_indices:
+            if i < len(tmp_paths):
+                text = extract_text(tmp_paths[i])
                 if text:
-                    documents.append({"name": df.filename, "text": text})
+                    documents.append({"name": file_entries[i]["filename"], "text": text})
 
-        case_payload = {"patient": patient_data, "exams": exams_payload, "documents": documents}
+        # Extract text from lab-result PDFs → analyzed as standalone exams
+        document_exams = []
+        for i in doc_exam_indices:
+            if i < len(tmp_paths):
+                text = extract_text(tmp_paths[i])
+                if text:
+                    document_exams.append({"name": file_entries[i]["filename"], "text": text})
+
+        case_payload = {
+            "patient": patient_data,
+            "exams": exams_payload,
+            "documents": documents,
+            "document_exams": document_exams,
+        }
         results = process_case(case_payload)
 
         # Persist to DB if user is authenticated
@@ -503,15 +537,19 @@ async def analyze_case(
                         height_cm=patient_data.get("height_cm"),
                     ))
 
+            all_exams_for_summary = exams_payload + [
+                {"name": d["name"], "modality": "Laboratorial", "image_paths": []}
+                for d in document_exams
+            ]
             exams_summary = json.dumps([
                 {"name": e.get("name", ""), "modality": e.get("modality", ""),
                  "image_count": len(e.get("image_paths", []))}
-                for e in exams_payload
+                for e in all_exams_for_summary
             ], ensure_ascii=False)
 
             title = patient_data.get("name") or "Caso Clínico"
-            if exams_payload:
-                title += f" — {exams_payload[0].get('name', '')}"
+            if all_exams_for_summary:
+                title += f" — {all_exams_for_summary[0].get('name', '')}"
 
             case_record = ClinicalCase(
                 user_id=user.id,
